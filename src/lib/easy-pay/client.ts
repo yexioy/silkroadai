@@ -103,14 +103,61 @@ export async function createPayment(
   params.sign_type = 'MD5';
 
   const formData = new URLSearchParams(params);
-  const response = await fetch(`${apiBase}/mapi.php`, {
+  const url = `${apiBase}/mapi.php`;
+
+  // ── W5 D6 TEMP DEBUG (remove once live recharge confirmed working) ──
+  // Mask sign + redact pkey (pkey never in body, defensive). Print raw
+  // response BEFORE JSON.parse so we see what zpayz actually returned
+  // even when body is empty / HTML / anything that breaks JSON.
+  const maskedParams: Record<string, string> = {};
+  for (const [k, v] of Object.entries(params)) {
+    if (k === 'sign') {
+      maskedParams[k] = v.slice(0, 6) + '...';
+    } else {
+      maskedParams[k] = v;
+    }
+  }
+  console.log('[easypay-debug] →', {
+    url,
+    method: 'POST',
+    contentType: 'application/x-www-form-urlencoded',
+    bodyParams: maskedParams,
+    pkeyPreview: pkey.slice(0, 6) + '...',
+  });
+
+  const response = await fetch(url, {
     method: 'POST',
     body: formData,
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     signal: AbortSignal.timeout(10_000),
   });
 
-  const data = (await response.json()) as EasyPayCreateResponse;
+  const respHeaders: Record<string, string> = {};
+  response.headers.forEach((v, k) => {
+    respHeaders[k] = v;
+  });
+  // ALWAYS read text first — JSON.parse on empty / HTML body throws and
+  // swallows the actual content we need to diagnose.
+  const rawText = await response.text();
+  console.log('[easypay-debug] ←', {
+    status: response.status,
+    statusText: response.statusText,
+    headers: respHeaders,
+    bodyLength: rawText.length,
+    bodyPreview: rawText.slice(0, 2000),
+  });
+
+  let data: EasyPayCreateResponse;
+  try {
+    data = JSON.parse(rawText) as EasyPayCreateResponse;
+  } catch (parseErr) {
+    console.error('[easypay-debug] JSON.parse failed on response body:', parseErr);
+    throw new Error(
+      `EasyPay create payment: response not JSON (status=${response.status}, length=${rawText.length}, preview="${rawText.slice(0, 200)}")`,
+    );
+  }
+  // ── END W5 D6 TEMP DEBUG ──
+
   if (data.code !== 1) {
     throw new Error(`EasyPay create payment failed: ${data.msg || 'unknown error'}`);
   }
