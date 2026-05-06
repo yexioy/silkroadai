@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
 """
-W7 D1 — pricing audit xlsx generator.
+W7 D1 → W7 D2 — pricing audit xlsx generator.
 
 Inputs:
   /tmp/newapi-pricing.json         — `/api/pricing` dump from new-api admin
   /tmp/newapi-channel-models.tsv   — channel_id, name, type, models CSV
   Hard-coded SF wholesale + comparison data below (from web fetches; cited)
 
-Output:
-  /Users/mac/Documents/silk road ai/docs/W7-D1-pricing-audit.xlsx (3 sheets)
+Output (set via --w7d2 flag):
+  /Users/mac/Documents/silk road ai/docs/W7-D1-pricing-audit.xlsx (D1 default)
+  /Users/mac/Documents/silk road ai/docs/W7-D2-pricing-audit.xlsx (post-cutover)
+
+Constants (W7 D2 cutover flipped these — pass --w7d2 to use post-cutover values):
+  QPU_PER_USD: 500_000 (D1) → 1_000_000 (D2)
+  USD_TO_CNY:  7.2 (D1)      → 7.0 (D2 fixed)
 """
 import json
+import sys
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-USD_TO_CNY = 7.2
+W7D2_MODE = '--w7d2' in sys.argv
+USD_TO_CNY = 7.0 if W7D2_MODE else 7.2
+# After QPU=1M (W7 D2 cutover), USD/1M_tokens = mr × 1. Pre-cutover at QPU=500K it was mr × 2.
+USD_PER_MR_PER_1M = 1.0 if W7D2_MODE else 2.0
 
 # =============================================================================
 # Load data
@@ -144,8 +153,8 @@ def customer_prices(model_name):
             'cr': r.get('completion_ratio', 1),
             'is_default_fallback': is_default_fallback,
         }
-    in_usd = r['model_ratio'] * 2
-    out_usd = r['model_ratio'] * r.get('completion_ratio', 1) * 2
+    in_usd = r['model_ratio'] * USD_PER_MR_PER_1M
+    out_usd = r['model_ratio'] * r.get('completion_ratio', 1) * USD_PER_MR_PER_1M
     return {
         'mode': 'per_token',
         'in_usd_1m': in_usd,
@@ -160,7 +169,52 @@ def customer_prices(model_name):
 # =============================================================================
 # Master rows — pick representative subset (alias and canonical de-duped)
 # =============================================================================
-PRIORITY_MODELS = [
+if W7D2_MODE:
+    # Post-cutover whitelist (operator-confirmed via project_silkroadai_pricing_strategy.md):
+    # 6 Anthropic + 8 OpenAI + 22 SF = 36 SKU. No legacy/dated variants.
+    PRIORITY_MODELS = [
+        # SF (22 — cost-plus pricing, 0 promo)
+        'BAAI/bge-m3',
+        'Pro/BAAI/bge-m3',
+        'MiniMaxAI/MiniMax-M2.5',
+        'Pro/MiniMaxAI/MiniMax-M2.5',
+        'deepseek-ai/DeepSeek-V4-Flash',
+        'tencent/Hunyuan-A13B-Instruct',
+        'Qwen/Qwen3-VL-8B-Instruct',
+        'Qwen/Qwen3-VL-32B-Instruct',
+        'Pro/deepseek-ai/DeepSeek-V3.1-Terminus',
+        'Pro/deepseek-ai/DeepSeek-V3.2',
+        'deepseek-ai/DeepSeek-V3.1-Terminus',
+        'deepseek-ai/DeepSeek-V3.2',
+        'zai-org/GLM-4.6',
+        'Pro/moonshotai/Kimi-K2-Instruct-0905',
+        'moonshotai/Kimi-K2-Instruct-0905',
+        'Pro/zai-org/GLM-4.7',
+        'deepseek-ai/DeepSeek-V3',
+        'Pro/deepseek-ai/DeepSeek-V3',
+        'Pro/deepseek-ai/DeepSeek-R1',
+        'Pro/moonshotai/Kimi-K2-Thinking',
+        'deepseek-ai/DeepSeek-R1',
+        'moonshotai/Kimi-K2-Thinking',
+        # sub2api Anthropic (6 — 50% promo through 2026-06-09)
+        'claude-opus-4-7',
+        'claude-opus-4-6',
+        'claude-opus-4-5',
+        'claude-sonnet-4-6',
+        'claude-sonnet-4-5',
+        'claude-haiku-4-5',
+        # sub2api-openai (8 — 50% promo through 2026-06-09)
+        'gpt-5.2',
+        'gpt-5.3-codex',
+        'gpt-5.4',
+        'gpt-5.4-mini',
+        'gpt-5.5',
+        'gpt-4o-audio-preview',
+        'gpt-4o-realtime-preview',
+        'gpt-image-1.5',
+    ]
+else:
+    PRIORITY_MODELS = [
     # SiliconFlow (canonical only — short-aliases are echos under same channel)
     'deepseek-ai/DeepSeek-V4-Flash',
     'Pro/deepseek-ai/DeepSeek-V3.2',
@@ -314,11 +368,15 @@ BLUE   = PatternFill('solid', fgColor='E3F2FD')
 def margin_fill(margin):
     if margin is None:
         return None
-    if margin < 0.20:
+    # W7 D2 thresholds: SF cost-plus formula intentionally targets ~17%
+    # blended margin ("+20% markup over wholesale" per
+    # project_silkroadai_pricing_strategy.md). Anything ≥ 15% is by-design
+    # healthy GREEN. RED is now reserved for genuine concern (< 10%).
+    if margin < 0.10:
         return RED
-    if margin < 0.30:
+    if margin < 0.15:
         return YELLOW
-    if margin < 0.60:
+    if margin < 0.50:
         return GREEN
     return BLUE
 
@@ -327,13 +385,13 @@ def margin_label(margin):
         return 'TBD'
     if margin < 0:
         return 'LOSS (亏本)'
-    if margin < 0.20:
-        return 'red (<20%)'
-    if margin < 0.30:
-        return 'yellow (20-30%)'
-    if margin < 0.60:
-        return 'green (30-60%)'
-    return 'blue (>60%)'
+    if margin < 0.10:
+        return 'red (<10%)'
+    if margin < 0.15:
+        return 'yellow (10-15%)'
+    if margin < 0.50:
+        return 'green (15-50%)'
+    return 'blue (>50%)'
 
 # -----------------------------------------------------------------------------
 # Sheet 1 — Pricing Master
@@ -415,18 +473,22 @@ for i, h in enumerate(HEADERS_2, 1):
     c.border = BORDER
 ws2.row_dimensions[1].height = 30
 
-# Bands buckets
+# Bands buckets — W7 D2 thresholds aligned with margin_fill() / margin_label():
+# RED   < 10%  (genuine concern; SF formula yields 17% by design so should NOT hit)
+# YELLOW 10-15% (thin but acceptable transitional)
+# GREEN  15-50% (healthy; SF cost-plus & sub2api promo land here)
+# BLUE   > 50%  (over-priced — flag for "do customers find replacements?")
 ALERT_ROWS = []
 for r in rows:
     if r['margin'] is None:
         ALERT_ROWS.append(('TBD', r))
     elif r['margin'] < 0:
         ALERT_ROWS.append(('LOSS', r))
-    elif r['margin'] < 0.20:
+    elif r['margin'] < 0.10:
         ALERT_ROWS.append(('RED', r))
-    elif r['margin'] < 0.30:
+    elif r['margin'] < 0.15:
         ALERT_ROWS.append(('YELLOW', r))
-    elif r['margin'] >= 0.60:
+    elif r['margin'] >= 0.50:
         ALERT_ROWS.append(('BLUE', r))
     # GREEN models omitted — only show needs-attention rows
 SEVERITY_ORDER = {'LOSS': 0, 'RED': 1, 'YELLOW': 2, 'BLUE': 3, 'TBD': 4}
@@ -434,10 +496,10 @@ ALERT_ROWS.sort(key=lambda x: (SEVERITY_ORDER[x[0]], -(x[1].get('in_cny') or 0))
 
 ACTION_FOR = {
     'LOSS':   '⚠️ 亏本卖,立即调价或下架。',
-    'RED':    '🟥 毛利<20%,需调价或与上游议价。',
-    'YELLOW': '🟨 毛利薄,可缓推但 W7+ 调价。',
-    'BLUE':   '🟦 毛利>60%,客户可能找替代,考虑微降以促转化。',
-    'TBD':    '⏳ 等运营者填 wholesale 后再评估。',
+    'RED':    '🟥 毛利<10%,极薄;调价或与上游议价。',
+    'YELLOW': '🟨 毛利 10-15%,薄但 W7 战略可接受。',
+    'BLUE':   '🟦 毛利>50%,客户可能找替代,考虑微降以促转化。',
+    'TBD':    '⏳ 无 wholesale 数据(sub2api 渠道),margin 计算 N/A。',
 }
 SEVERITY_FILL = {'LOSS': RED, 'RED': RED, 'YELLOW': YELLOW, 'BLUE': BLUE, 'TBD': PatternFill('solid', fgColor='F5F5F5')}
 
@@ -544,7 +606,11 @@ for i, w in enumerate(WIDTHS_3, 1):
 ws3.freeze_panes = 'A2'
 
 # -----------------------------------------------------------------------------
-out_path = '/Users/mac/Documents/silk road ai/docs/W7-D1-pricing-audit.xlsx'
+out_path = (
+    '/Users/mac/Documents/silk road ai/docs/W7-D2-pricing-audit.xlsx'
+    if W7D2_MODE
+    else '/Users/mac/Documents/silk road ai/docs/W7-D1-pricing-audit.xlsx'
+)
 wb.save(out_path)
 print(f"saved → {out_path}")
 print(f"  sheet 1 rows: {len(rows)}")
@@ -559,11 +625,11 @@ for r in rows:
         band_counts['TBD'] += 1
     elif r['margin'] < 0:
         band_counts['LOSS'] += 1
-    elif r['margin'] < 0.20:
+    elif r['margin'] < 0.10:
         band_counts['RED'] += 1
-    elif r['margin'] < 0.30:
+    elif r['margin'] < 0.15:
         band_counts['YELLOW'] += 1
-    elif r['margin'] < 0.60:
+    elif r['margin'] < 0.50:
         band_counts['GREEN'] += 1
     else:
         band_counts['BLUE'] += 1
