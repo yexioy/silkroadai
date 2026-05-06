@@ -2,52 +2,48 @@
 /**
  * W7 D2 Phase 3 — apply post-launch pricing across the 3 channels.
  *
- * Reads the operator-supplied pricing decisions (whitelists + retail
- * prices + SF wholesale + promo discount) from constants below, computes
- * the new {model_ratio, completion_ratio, models} per channel, prints
- * a Before/After diff, and (with --apply) PUTs the changes via
- * new-api admin API at PUT /api/channel/<id>.
+ * Two distinct write paths (do NOT confuse them — gotcha #18 was
+ * triggered by collapsing them into one PUT):
+ *
+ *   1. `writeChannelModels(id, models[])` — PUT /api/channel/<id> with
+ *      ONLY the `models` field changed (cold-SKU delete). Channel
+ *      record never carries per-model ratios.
+ *
+ *   2. `writeOptionRatios({ ModelRatio, CompletionRatio })` — GET +
+ *      merge + PUT /api/option/. Per-model ratios live HERE, in
+ *      global JSON-encoded options entries. Channel-level PUT silently
+ *      drops `model_ratio` / `completion_ratio` fields (no such columns
+ *      on channels table).
+ *
+ * After every --apply the script ALWAYS re-fetches /api/pricing and
+ * verifies all 36 SKUs match expected mr / cr (`findPricingMismatches`).
+ * Exits non-zero on any mismatch — never trusts the PUT envelope's
+ * `success: true`. (Adding this check is what closed the W7 D2 wound.)
  *
  * Conventions
  * -----------
- * After Phase 2 (QuotaPerUnit 500K → 1M, fixed FX ¥7/USD), the cost
- * formula is:
- *   quota_consumed = tokens × model_ratio × group_ratio × (1 if input else completion_ratio)
- *   USD            = quota_consumed / QuotaPerUnit (= 1M)
+ * After Phase 2 (QuotaPerUnit 500K → 1M, fixed FX ¥7/USD):
+ *   USD/1M_input   = model_ratio
+ *   USD/1M_output  = model_ratio × completion_ratio
  *
- * Therefore at QPU=1M:
- *   USD/1M_tokens (input)  = model_ratio × 1
- *   USD/1M_tokens (output) = model_ratio × completion_ratio
- *
- * So `model_ratio` reads as "USD per 1M input tokens" — direct.
- *
- * Promo math (海外渠道 only)
- * --------------------------
- * promo_ratio = retail_ratio × 0.5
- * post_promo_ratio = retail_ratio (Phase 7 exit script multiplies by 2)
- *
- * SF formula (国内渠道,不打折)
- * ---------------------------
- * mr = wholesale_¥_per_1M_input / 5.83    (gives ~20% markup, ~17% margin)
- * cr = wholesale_¥_out / wholesale_¥_in    (preserves output/input ratio)
+ * Promo (overseas only): mr = retail × 0.5. SF: mr = wholesale_¥/5.83.
  *
  * Usage
  * -----
  *   tsx _bootstrap/apply-w7-pricing.ts             # dry-run (default)
  *   tsx _bootstrap/apply-w7-pricing.ts --apply     # PUT to admin API
  *
- * Pre-reqs
- * --------
- *   - SSH tunnel:  ssh -fN -L 3000:localhost:3000 vps
- *   - Env loaded:  NEWAPI_BASE_URL, NEWAPI_ADMIN_TOKEN, NEWAPI_ADMIN_USER_ID
- *   - Phase 2 NOT yet run (this script writes ratios that assume QPU=1M;
- *     they're correct after Phase 2 flips QPU and apply Phase 4 sync,
- *     so the order is: this script's --apply MUST run between Phase 2
- *     and Phase 5 verification, with the maintenance-window strategy
- *     described in the brief)
+ * Pre-reqs: SSH tunnel + env (NEWAPI_BASE_URL + ADMIN_TOKEN + ADMIN_USER_ID).
+ * Phase 2 (db QPU + balance migration) must already be applied — these
+ * ratios are written under post-Phase-2 unit conventions.
  */
 import { config as dotenvConfig } from 'dotenv';
 dotenvConfig();
+import {
+    mergeRatioMap,
+    findPricingMismatches,
+    type RatioMap,
+} from './lib/option-ratio-merge';
 
 const NEWAPI_BASE_URL = process.env.NEWAPI_BASE_URL || 'http://localhost:3000';
 const NEWAPI_ADMIN_TOKEN = process.env.NEWAPI_ADMIN_TOKEN;
@@ -89,9 +85,14 @@ const PROMO_DISCOUNT = 0.5;
  * output/input retail ratio (Anthropic's family-wide convention is 5x).
  */
 const SUB2API_CLAUDE_WHITELIST: Record<string, { retailIn: number; retailOut: number; note?: string }> = {
-    'claude-opus-4-7':    { retailIn: 15, retailOut: 75, note: 'Opus 4.x tier' },
-    'claude-opus-4-6':    { retailIn: 15, retailOut: 75, note: 'Opus 4.x tier' },
-    'claude-opus-4-5':    { retailIn: 15, retailOut: 75, note: 'Opus 4.x tier' },
+    // Opus tier — Path A alignment with project_silkroadai_pricing_strategy.md:
+    // Opus retail in this strategy = $5/$25 (not the public Anthropic
+    // page's $15/$75; this is the strategy-level "reference price" used
+    // for promo derivation). Promo mr=2.5, cr=5 (cr stable: 25/5 = 5).
+    // Phase 7 exit (mr × 2) lands at retail mr=5.0, cr=5.
+    'claude-opus-4-7':    { retailIn: 5,  retailOut: 25, note: 'Opus tier — strategy retail $5/$25' },
+    'claude-opus-4-6':    { retailIn: 5,  retailOut: 25, note: 'Opus tier — strategy retail $5/$25' },
+    'claude-opus-4-5':    { retailIn: 5,  retailOut: 25, note: 'Opus tier — strategy retail $5/$25' },
     'claude-sonnet-4-6':  { retailIn: 3,  retailOut: 15, note: 'Sonnet 4.x tier' },
     'claude-sonnet-4-5':  { retailIn: 3,  retailOut: 15, note: 'Sonnet 4.x tier' },
     'claude-haiku-4-5':   { retailIn: 1,  retailOut: 5,  note: 'Haiku 4.x tier' },
@@ -215,6 +216,14 @@ async function fetchChannel(id: number): Promise<Channel> {
 function parseModels(csv: string | null): string[] {
     if (!csv) return [];
     return csv.split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+/** Round to 4 decimals — kills IEEE 754 representation drift so the
+ *  global ratio JSON is byte-stable across script runs (lets the
+ *  post-write verify + future dry-runs compare cleanly without
+ *  spurious "overwrite" entries). */
+function roundTo4(n: number): number {
+    return Math.round(n * 10000) / 10000;
 }
 
 function parseJsonOrEmpty(s: string | null | undefined): Record<string, number> {
@@ -356,13 +365,17 @@ function planSiliconflow(current: Channel, activeModels: Set<string>): ChannelPl
     for (const m of currentModels) {
         const ws = SF_WHOLESALE_CNY[m];
         if (ws) {
-            // Has wholesale → priced via formula
+            // Has wholesale → priced via formula. Round to 4 decimal
+            // places so values stay byte-stable across runs (rationale:
+            // /api/pricing returns the JSON value as-is, and we want the
+            // post-apply verify + idempotent dry-run to compare cleanly
+            // without IEEE 754 representation drift).
             kept.push(m);
             // Free models (e.g. bge-m3 promo) still get mr=0 — new-api treats
             // 0 as "free" (no quota consumed).
-            mr[m] = ws.in_cny_per_1m / SF_DIVISOR;
+            mr[m] = roundTo4(ws.in_cny_per_1m / SF_DIVISOR);
             cr[m] = ws.in_cny_per_1m > 0
-                ? ws.out_cny_per_1m / ws.in_cny_per_1m
+                ? roundTo4(ws.out_cny_per_1m / ws.in_cny_per_1m)
                 : 1;
         } else if (activeModels.has(m)) {
             // No wholesale, but customers used it → keep + ceiling + flag
@@ -457,36 +470,129 @@ async function main(): Promise<void> {
     reportPlan('sub2api-openai',             ai, planOpenAI);
     reportPlan('siliconflow',                sf, planSF);
 
+    // Aggregate the 36-SKU expected mr / cr across all channels — used
+    // by both the dry-run option-merge preview and the post-write verify.
+    const expectedMr: RatioMap = {};
+    const expectedCr: RatioMap = {};
+    for (const plan of [planClaude, planOpenAI, planSF]) {
+        const mr = JSON.parse(plan.model_ratio) as RatioMap;
+        const cr = JSON.parse(plan.completion_ratio) as RatioMap;
+        for (const [k, v] of Object.entries(mr)) expectedMr[k] = v;
+        for (const [k, v] of Object.entries(cr)) expectedCr[k] = v;
+    }
+
+    // Pre-fetch current option JSON so dry-run can preview the merge.
+    const optionsBefore = await api<Array<{ key: string; value: string }>>('/api/option/');
+    const currentMrJson =
+        optionsBefore.find((o) => o.key === 'ModelRatio')?.value ?? '{}';
+    const currentCrJson =
+        optionsBefore.find((o) => o.key === 'CompletionRatio')?.value ?? '{}';
+
+    const mrPlan = mergeRatioMap(currentMrJson, expectedMr);
+    const crPlan = mergeRatioMap(currentCrJson, expectedCr);
+
+    console.log(`\n────────────────────────────────────────────────────────────────────`);
+    console.log(`Will PUT /api/option/ ModelRatio  (${Object.keys(mrPlan.merged).length} keys total)`);
+    console.log(`────────────────────────────────────────────────────────────────────`);
+    console.log(`  ${mrPlan.added.length} added · ${mrPlan.overwritten.length} overwritten · ${mrPlan.unchanged.length} unchanged · ${mrPlan.preserved.length} preserved (untouched)`);
+    if (mrPlan.overwritten.length > 0) {
+        console.log(`  OVERWRITES (existing global ratio → new):`);
+        for (const o of mrPlan.overwritten) {
+            console.log(`    ${o.model.padEnd(50)} ${String(o.oldValue).padStart(8)} → ${String(o.newValue).padStart(8)}`);
+        }
+    }
+
+    console.log(`\n────────────────────────────────────────────────────────────────────`);
+    console.log(`Will PUT /api/option/ CompletionRatio  (${Object.keys(crPlan.merged).length} keys total)`);
+    console.log(`────────────────────────────────────────────────────────────────────`);
+    console.log(`  ${crPlan.added.length} added · ${crPlan.overwritten.length} overwritten · ${crPlan.unchanged.length} unchanged · ${crPlan.preserved.length} preserved (untouched)`);
+
     if (!APPLY) {
         console.log(`\n────────────────────────────────────────────────────────────────────`);
-        console.log(`Dry-run complete. Pass --apply to PUT changes to new-api admin API.`);
+        console.log(`Dry-run complete. Pass --apply to write to new-api admin API.`);
         console.log(`────────────────────────────────────────────────────────────────────`);
         return;
     }
 
-    // Apply: PUT each channel with the new {models, model_ratio, completion_ratio}.
-    // We MERGE with the existing channel JSON rather than overwrite — new-api
-    // expects the full channel object on PUT, and clearing other fields would
-    // wipe model_mapping (gotcha #15 hot zone).
+    // ── APPLY phase 1 of 2: channel.models (cold-SKU delete) ────────────
+    // Channel PUT: ONLY change `models`. Do NOT include model_ratio /
+    // completion_ratio in the body — channels table has no such columns,
+    // PUT would silently drop them (gotcha #18, found 2026-05-06).
     for (const [label, current, plan] of [
         ['sub2api Claude',     cl, planClaude],
         ['sub2api-openai',     ai, planOpenAI],
         ['siliconflow',        sf, planSF],
     ] as const) {
-        const merged = {
-            ...current,
-            models: plan.models,
-            model_ratio: plan.model_ratio,
-            completion_ratio: plan.completion_ratio,
-        };
-        console.log(`\n→ PUT /api/channel/${current.id} (${label})...`);
-        await api(`/api/channel/`, { method: 'PUT', body: JSON.stringify(merged) });
-        console.log(`  ✓ updated`);
+        await writeChannelModels(current, plan.models, label);
     }
 
-    console.log(`\nAll three channels updated. Next steps:`);
-    console.log(`  1. Run scripts/rebuild-channel-model-mapping.ts <sf-channel-id> --apply  (gotcha #15)`);
-    console.log(`  2. Phase 5 verification (curl /api/pricing, post-fix audit xlsx)`);
+    // ── APPLY phase 2 of 2: ratios via /api/option/ JSON merge ──────────
+    await writeOptionRatio('ModelRatio', mrPlan.merged);
+    await writeOptionRatio('CompletionRatio', crPlan.merged);
+
+    // ── POST-WRITE VERIFICATION ────────────────────────────────────────
+    // Re-fetch /api/pricing and confirm the live state matches `expected`
+    // for all 36 SKUs. Catches any silent-drop regression — never trusts
+    // the PUT envelope's `success:true` marker.
+    console.log(`\n────────────────────────────────────────────────────────────────────`);
+    console.log(`Post-write verification: GET /api/pricing → diff against expected`);
+    console.log(`────────────────────────────────────────────────────────────────────`);
+    const live = await api<Array<{ model_name: string; model_ratio: number; completion_ratio: number }>>(
+        '/api/pricing',
+    );
+    const mismatches = findPricingMismatches(live, expectedMr, expectedCr);
+    if (mismatches.length > 0) {
+        console.error(`\x1b[31m✗ ${mismatches.length} pricing mismatch(es):\x1b[0m`);
+        for (const m of mismatches) {
+            console.error(
+                `\x1b[31m  ${m.model.padEnd(50)} ${m.field.padEnd(18)} expected=${m.expected} actual=${Number.isNaN(m.actual) ? 'MISSING' : m.actual}\x1b[0m`,
+            );
+        }
+        console.error(`\x1b[31mAborting non-zero so the maintenance window operator notices.\x1b[0m`);
+        process.exit(1);
+    }
+    console.log(`✓ all ${Object.keys(expectedMr).length} SKU mr + ${Object.keys(expectedCr).length} SKU cr match live /api/pricing`);
+
+    console.log(`\nAll changes applied successfully. Next:`);
+    console.log(`  1. Run scripts/rebuild-channel-model-mapping.ts 1 --apply   (gotcha #15)`);
+    console.log(`  2. Phase 5 verification: real call to ai.silkroadai.io + audit xlsx regen`);
+}
+
+/**
+ * PUT /api/channel/ updating ONLY the `models` field (cold-SKU delete).
+ * Pulls the full channel JSON to preserve other fields (model_mapping —
+ * gotcha #15 — and any per-channel config we don't manage).
+ *
+ * Crucially does NOT include model_ratio / completion_ratio in the body
+ * — those columns don't exist on the channels table; including them
+ * would be silently dropped (gotcha #18) but more importantly would
+ * suggest to future maintainers that channel-level ratio storage is a
+ * thing.
+ */
+async function writeChannelModels(current: Channel, newModels: string, label: string): Promise<void> {
+    // Strip the silently-dropped fields via destructuring rather than
+    // sending them and trusting the server to ignore. Two reasons:
+    // (a) defense in depth against any new-api version that DOES start
+    //     honoring these fields (would drift from option-table source
+    //     of truth);
+    // (b) the rest-pattern visibly documents that we're NOT writing
+    //     ratios via this path — future maintainers shouldn't add
+    //     `model_ratio: ...` here without reading gotcha #18 first.
+    const { model_ratio: _droppedMr, completion_ratio: _droppedCr, ...rest } = current;
+    void _droppedMr;
+    void _droppedCr;
+    const body = { ...rest, models: newModels };
+    console.log(`\n→ PUT /api/channel/  (${label}, id=${current.id}, models=${newModels.split(',').length} entries)`);
+    await api('/api/channel/', { method: 'PUT', body: JSON.stringify(body) });
+    console.log(`  ✓ channel.models updated`);
+}
+
+/** PUT /api/option/ writing the merged ModelRatio or CompletionRatio JSON. */
+async function writeOptionRatio(key: 'ModelRatio' | 'CompletionRatio', merged: RatioMap): Promise<void> {
+    const json = JSON.stringify(merged);
+    console.log(`\n→ PUT /api/option/  ${key}  (${Object.keys(merged).length} keys, ${json.length} bytes)`);
+    await api('/api/option/', { method: 'PUT', body: JSON.stringify({ key, value: json }) });
+    console.log(`  ✓ ${key} written`);
 }
 
 main().catch((err) => {

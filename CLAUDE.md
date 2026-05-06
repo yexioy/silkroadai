@@ -268,6 +268,18 @@ LiteLLM 同时支持 user-level 和 key-level 预算。我们只用 key-level(�
 **正确写法**:任何新 OAuth provider 的 callback 都走"集中出口函数"模式 — 成功失败都 return 同一个 helper 构造的 response,helper 内 unconditionally 清 cookie。**不要**只在 happy path 末尾清。
 **首次发现**:W3 D6 引入(本特性),`docs/W3-D6-GOOGLE-OAUTH-VERIFICATION.md` F3。
 
+### 18. ⚠️ per-model `model_ratio` / `completion_ratio` 写错位置 — channel PUT 静默丢弃
+**症状**:`PUT /api/channel/<id>` 带 `{model_ratio: "...", completion_ratio: "..."}` 返回 `{success: true}`,看似成功;但 `GET /api/pricing` 仍返回旧值(或全局 default-fallback 37.5)。再 `GET /api/channel/<id>` 看 `model_ratio: null`。等于"写了个寂寞"。
+**真实行为**:`channels` 表**根本没有** `model_ratio` / `completion_ratio` 列(只有 `id, name, type, models, model_mapping, used_quota, ...`)。new-api 的 PUT handler 接受任意 JSON 字段,**未识别字段 silently dropped**(同 gotcha #10 PUT user 静默丢 access_token 的家族模式)。
+**真实存放位置**:`options` 表(W7 D2 实测有 213 个 key),per-model 价格存在以下三个全局 JSON entry:
+  - `options.key='ModelRatio'`         → JSON `{ "<model_name>": <mr>, ... }`
+  - `options.key='CompletionRatio'`    → JSON `{ "<model_name>": <cr>, ... }`
+  - `options.key='ModelPrice'`         → JSON 用于按请求次定价(image / audio 类),portal 暂不用
+**正确写法**:写 ratio 必须走 `PUT /api/option/` body `{ "key":"ModelRatio", "value":"<json string>" }`,而且要先 GET → JSON.parse → merge → JSON.stringify → PUT(否则 全替会洗掉手动配的 SKU)。`channel.models` 字段照常用 `PUT /api/channel/<id>`(那个是真生效的 cold-SKU delete 路径)。
+**绝对禁止**:依赖 PUT envelope 的 `success:true` 标记。**任何 ratio 写入完成后必须 GET `/api/pricing` 回读校验**,确认 mr / cr 与代码内预期值一致(见 `_bootstrap/lib/option-ratio-merge.ts` 的 `findPricingMismatches` helper)。
+**修复 commit**:`_bootstrap/apply-w7-pricing.ts` + `_bootstrap/exit-w7-promo.ts` 都改成 options 路径 + 内置 post-write 校验(W7 D2 收尾 PR #24)。
+**首次发现**:W7 D2 维护窗口实测(2026-05-06)— Step 5 channel PUT 显示 success,但 Step 7.2 真实付费调用扣 1425 quota(默认 37.5)而不是预期 19 quota(promo 0.5)。直接 SQL 查 `\d channels` 才看出列根本不存在。
+
 ---
 
 ## 不要做的事(避免误改)

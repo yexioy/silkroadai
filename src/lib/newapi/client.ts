@@ -43,8 +43,17 @@ const NEWAPI_ADMIN_USER_ID = process.env.NEWAPI_ADMIN_USER_ID;
 
 // new-api 默认 1 USD = 500,000 quota(可在 admin 后台改)
 // 如果你改了,这里也要同步,或者改用 GET /api/option/ 动态拉取
-export const QUOTA_PER_USD = parseInt(process.env.NEWAPI_QUOTA_PER_USD || '500000', 10);
-export const USD_TO_CNY_RATE = parseFloat(process.env.USD_TO_CNY_RATE || '7.2');
+// W7 D2 (2026-05-06): defaults flipped 500_000 → 1_000_000 and 7.2 → 7
+// to match new-api's QuotaPerUnit + USDExchangeRate after the launch
+// pricing migration. Frankqy's pre-cutover ¥10 balance (694444 quota
+// under 500K/7.2) was preserved by the × 2.0571 db migration; under
+// the new constants the same balance reads ¥10.00 again.
+//
+// CRITICAL: these defaults MUST stay in lockstep with new-api's options
+// table. If new-api's QuotaPerUnit / USDExchangeRate ever change again,
+// flip these in the same atomic deploy.
+export const QUOTA_PER_USD = parseInt(process.env.NEWAPI_QUOTA_PER_USD || '1000000', 10);
+export const USD_TO_CNY_RATE = parseFloat(process.env.USD_TO_CNY_RATE || '7');
 
 if (!NEWAPI_ADMIN_TOKEN || !NEWAPI_ADMIN_USER_ID) {
     throw new Error(
