@@ -100,27 +100,39 @@ const SUB2API_CLAUDE_WHITELIST: Record<string, { retailIn: number; retailOut: nu
 /**
  * sub2api-openai — keep these 8, delete all other gpt-* / gpt-image-*.
  *
- * Retail prices: confirmed by operator for gpt-5.5 ($5 input).
- * Other SKUs use plausible defaults based on tier hierarchy:
- *   - gpt-5.2 = baseline (similar to gpt-4.1 tier $2/$8)
- *   - gpt-5.3-codex / gpt-5.4 = mid-flagship (~$3-5 / $12-20)
- *   - gpt-5.4-mini = cost-tier ($0.5/$2)
- *   - gpt-5.5 = top flagship ($5/$25, per operator)
- *   - gpt-4o-audio-preview = audio handling premium ($2.5/$10 best estimate)
- *   - gpt-4o-realtime-preview = realtime + audio premium ($5/$20 best estimate)
- *   - gpt-image-1.5 = per-image priced (skip per-token mr; tag for follow-up)
+ * Operator-confirmed via project_silkroadai_pricing_strategy.md.
+ * Two pricing modes coexist:
  *
- * ⚠️  ANY of these where you have authoritative retail prices: edit before --apply.
+ *   - `text` SKUs: priced from retail USD/1M tokens. Promo path is
+ *     `mr = retailIn × 0.5`, `cr = retailOut / retailIn`. Phase 7
+ *     exit multiplies mr by 2 → restores retail.
+ *
+ *   - `multimodal` SKUs (audio / realtime / image): priced as
+ *     engineering values (`promoMr` / `promoCr` direct), not derived
+ *     from per-token retail. Phase 7 exit multiplies mr by 2 → matches
+ *     `retailMr`. cr stays unchanged across promo / retail.
+ *     Strategy doc §multimodal accepts the "1× text token = 4× pricing
+ *     if customer chats with image-1.5" trade-off; we keep gpt-image-1.5
+ *     on the per-token ratio path (no `skipPerTokenRatio`) to avoid
+ *     introducing a `model_price` schema branch in this maintenance
+ *     window.
  */
-const SUB2API_OPENAI_WHITELIST: Record<string, { retailIn: number; retailOut: number; note?: string; skipPerTokenRatio?: boolean }> = {
-    'gpt-5.2':                    { retailIn: 2.00, retailOut: 8.00,  note: '✱ defaulted: baseline tier (gpt-4.1-similar)' },
-    'gpt-5.3-codex':              { retailIn: 3.00, retailOut: 12.00, note: '✱ defaulted: mid-flagship (codex specialty)' },
-    'gpt-5.4':                    { retailIn: 5.00, retailOut: 20.00, note: '✱ defaulted: mid-flagship' },
-    'gpt-5.4-mini':               { retailIn: 0.50, retailOut: 2.00,  note: '✱ defaulted: cost tier' },
-    'gpt-5.5':                    { retailIn: 5.00, retailOut: 25.00, note: 'operator-confirmed $5 input; output assumed $25 (5x)' },
-    'gpt-4o-audio-preview':       { retailIn: 2.50, retailOut: 10.00, note: '✱ defaulted: per-token portion of audio model' },
-    'gpt-4o-realtime-preview':    { retailIn: 5.00, retailOut: 20.00, note: '✱ defaulted: realtime + audio premium' },
-    'gpt-image-1.5':              { retailIn: 0,    retailOut: 0,     skipPerTokenRatio: true, note: 'per-image priced; ratios skipped, model kept in channel' },
+type SubApiOpenAIEntry =
+    | { kind: 'text'; retailIn: number; retailOut: number; note?: string }
+    | { kind: 'multimodal'; promoMr: number; promoCr: number; retailMr: number; retailCr: number; note?: string };
+
+const SUB2API_OPENAI_WHITELIST: Record<string, SubApiOpenAIEntry> = {
+    // Text SKUs — retail-derived
+    'gpt-5.2':       { kind: 'text', retailIn: 1.75, retailOut: 14.00 },  // promo mr=0.875, cr=8
+    'gpt-5.3-codex': { kind: 'text', retailIn: 1.75, retailOut: 14.00 },  // promo mr=0.875, cr=8
+    'gpt-5.4':       { kind: 'text', retailIn: 2.50, retailOut: 15.00 },  // promo mr=1.25,  cr=6
+    'gpt-5.4-mini':  { kind: 'text', retailIn: 0.75, retailOut:  4.50 },  // promo mr=0.375, cr=6
+    'gpt-5.5':       { kind: 'text', retailIn: 5.00, retailOut: 30.00 },  // promo mr=2.5,   cr=6  (NOTE: $30 output, not $25)
+
+    // Multimodal SKUs — engineering values, not retail-derived
+    'gpt-4o-audio-preview':    { kind: 'multimodal', promoMr: 20, promoCr: 2, retailMr: 40,  retailCr: 2 },
+    'gpt-4o-realtime-preview': { kind: 'multimodal', promoMr: 50, promoCr: 2, retailMr: 100, retailCr: 2 },
+    'gpt-image-1.5':           { kind: 'multimodal', promoMr:  4, promoCr: 4, retailMr:  8,  retailCr: 4 },
 };
 
 /**
@@ -301,9 +313,28 @@ function planSub2apiOpenAI(current: Channel): ChannelPlan {
     const cr: Record<string, number> = {};
     for (const m of whitelist) {
         const wl = SUB2API_OPENAI_WHITELIST[m];
-        if (wl.skipPerTokenRatio) continue;
-        mr[m] = wl.retailIn * PROMO_DISCOUNT;
-        cr[m] = wl.retailIn > 0 ? wl.retailOut / wl.retailIn : 1;
+        if (wl.kind === 'text') {
+            // Promo: mr = retail × 0.5; cr = retail_out / retail_in.
+            // Exit multiplies mr by 2 → restores retail.
+            mr[m] = wl.retailIn * PROMO_DISCOUNT;
+            cr[m] = wl.retailIn > 0 ? wl.retailOut / wl.retailIn : 1;
+        } else {
+            // multimodal — direct values; cr stays the same across
+            // promo and retail. Exit multiplies promoMr by 2 = retailMr.
+            mr[m] = wl.promoMr;
+            cr[m] = wl.promoCr;
+            // Defensive sanity: confirm retailMr === promoMr × 2 so the
+            // exit script's mr×2 logic produces the operator-specified
+            // retail value. Errors at apply-time, not silently.
+            const expected = wl.promoMr * 2;
+            if (Math.abs(wl.retailMr - expected) > 1e-6) {
+                throw new Error(
+                    `multimodal pricing inconsistency for ${m}: ` +
+                    `promoMr=${wl.promoMr}, promoMr×2=${expected}, retailMr=${wl.retailMr} ` +
+                    `(exit-w7-promo.ts uses mr×2 — fix one of the two)`,
+                );
+            }
+        }
     }
 
     return {
