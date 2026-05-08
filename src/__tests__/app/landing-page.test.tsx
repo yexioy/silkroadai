@@ -85,21 +85,20 @@ describe('landing page — promo ACTIVE', () => {
         expect(html).toContain('当前促销 · 海外模型 5 折');
     });
 
-    it('renders trust row with WeChat Global_Ads + support email', async () => {
+    // W7 D4 PR-R Item B — the legacy in-page <Trust /> prose row
+    // duplicated the global <Footer />'s contact + legal-link block.
+    // Trust is gone; the global footer covers Global_Ads / support@ /
+    // /terms / /privacy / /refund (asserted in
+    // src/__tests__/components/footer.test.tsx).
+    it('does NOT render the legacy in-page Trust prose row (PR-R)', async () => {
         const Page = await loadPage();
         const tree = await Page({ searchParams: Promise.resolve({}) });
         const html = renderToString(tree);
-        expect(html).toContain('Global_Ads');
-        expect(html).toContain('support@silkroadai.io');
-    });
-
-    it('renders three legal links to existing /terms /privacy /refund paths', async () => {
-        const Page = await loadPage();
-        const tree = await Page({ searchParams: Promise.resolve({}) });
-        const html = renderToString(tree);
-        expect(html).toMatch(/href="\/terms"/);
-        expect(html).toMatch(/href="\/privacy"/);
-        expect(html).toMatch(/href="\/refund"/);
+        // Distinctive copy that only ever lived in <Trust /> — not
+        // surfaced anywhere else (Footer says "Connecting Global
+        // Intelligence", not this string).
+        expect(html).not.toContain('由 Silk Road AI 运营团队维护');
+        expect(html).not.toContain('海外节点部署 · HTTPS 全程加密');
     });
 
     it('renders both CTAs: 立即开始 → /portal/register and 查看模型清单 → /models', async () => {

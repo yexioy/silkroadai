@@ -71,7 +71,13 @@ export default async function LandingPage({
             <WhyUs />
             <HowItWorks />
             <PricingTeaser promoActive={promoActive} />
-            <Trust />
+            {/* W7 D4 PR-R Item B — the in-page <Trust /> prose row
+             *  duplicated the global <Footer />'s contact + legal-link
+             *  block (rendered by `src/app/layout.tsx` on every page).
+             *  Operator visual feedback flagged the repetition; the
+             *  global footer covers it once. The horizontal divider
+             *  Trust used as its top border was also incidental — we
+             *  rely on the footer's own `border-t` instead. */}
         </main>
     );
 }
@@ -914,79 +920,6 @@ function PriceCell({
         );
     }
     return <strong style={{ color: 'var(--color-navy)' }}>{retail}</strong>;
-}
-
-/* ──────────────────────────────────────────────────────────────────── */
-/* Trust row                                                            */
-/* ──────────────────────────────────────────────────────────────────── */
-
-function Trust() {
-    return (
-        <Section style={{ padding: '40px 0 64px' }}>
-            <div
-                style={{
-                    borderTop: '1px solid var(--color-brand-border)',
-                    paddingTop: 32,
-                    color: 'var(--color-muted-ink)',
-                    fontSize: 14,
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: 10,
-                }}
-            >
-                <p style={{ margin: 0 }}>
-                    由 Silk Road AI 运营团队维护 · 海外节点部署 · HTTPS 全程加密
-                </p>
-                <p style={{ margin: 0 }}>
-                    <strong style={{ color: 'var(--color-navy)' }}>联系我们</strong>:微信{' '}
-                    <code
-                        style={{
-                            fontFamily: 'monospace',
-                            background: 'var(--color-paper-muted)',
-                            padding: '2px 8px',
-                            borderRadius: 4,
-                        }}
-                    >
-                        Global_Ads
-                    </code>{' '}
-                    · 邮箱{' '}
-                    <a
-                        href="mailto:support@silkroadai.io"
-                        style={{
-                            color: 'var(--color-navy)',
-                            textDecoration: 'none',
-                            borderBottom: '1px dotted var(--color-navy)',
-                        }}
-                    >
-                        support@silkroadai.io
-                    </a>
-                </p>
-                <p style={{ margin: 0 }}>
-                    <strong style={{ color: 'var(--color-navy)' }}>法律</strong>:
-                    <Link
-                        href="/terms"
-                        style={{ color: 'var(--color-navy)', textDecoration: 'none' }}
-                    >
-                        服务条款
-                    </Link>{' '}
-                    ·{' '}
-                    <Link
-                        href="/privacy"
-                        style={{ color: 'var(--color-navy)', textDecoration: 'none' }}
-                    >
-                        隐私政策
-                    </Link>{' '}
-                    ·{' '}
-                    <Link
-                        href="/refund"
-                        style={{ color: 'var(--color-navy)', textDecoration: 'none' }}
-                    >
-                        退款政策
-                    </Link>
-                </p>
-            </div>
-        </Section>
-    );
 }
 
 /* ──────────────────────────────────────────────────────────────────── */
