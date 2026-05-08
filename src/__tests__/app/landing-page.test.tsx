@@ -154,6 +154,19 @@ describe('landing page — promo ACTIVE', () => {
         expect(html).toMatch(/href="\/gpu"/);
     });
 
+    it('does NOT render a header 登录 button — /dashboard CTA covers both states (W7 D4 PR-R Item A)', async () => {
+        const Page = await loadPage();
+        const tree = await Page({ searchParams: Promise.resolve({}) });
+        const html = renderToString(tree);
+        // PR-R Item A drops the standalone "登录" header link. The
+        // 进入控制台 → CTA already routes guests to /login (via the
+        // W7 PR-I middleware) and signed-in users to /dashboard, so
+        // the lone "登录" button was redundant + visually crowded
+        // alongside GPU 租赁 and the primary control-room CTA.
+        expect(html).not.toMatch(/<a[^>]*href="\/login"[^>]*>登录<\/a>/);
+        expect(html).not.toMatch(/<a[^>]*>登录<\/a>/);
+    });
+
     it('does NOT render the W7-PR-P "更多:" footer row (removed in W7 D4 PR-Q)', async () => {
         const Page = await loadPage();
         const tree = await Page({ searchParams: Promise.resolve({}) });

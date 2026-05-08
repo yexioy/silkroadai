@@ -140,9 +140,12 @@ function Header() {
                  *  recommended pick below 48px. */}
                 <Logo variant="primary-flat" size={28} />
                 <nav style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                    {/* W7 D4 PR-Q — GPU 租赁 outline CTA. Brand-accent (gold)
-                     *  border to distinguish from the navy "进入控制台" CTA
-                     *  and signal a separate, higher-ASP product line. */}
+                    {/* W7 D4 PR-R Item A — operator visual feedback after PR-Q
+                     *  shipped: "登录" + "进入控制台 →" pair read as redundant
+                     *  affordances. /dashboard already double-duties (W7 PR-I:
+                     *  unauthenticated → /login, authenticated → /dashboard),
+                     *  so the lone "进入控制台" CTA covers both states without
+                     *  the visual clutter of a third nav button. */}
                     <Link
                         href="/gpu"
                         style={{
@@ -156,17 +159,6 @@ function Header() {
                         }}
                     >
                         GPU 租赁
-                    </Link>
-                    <Link
-                        href="/login"
-                        style={{
-                            color: 'var(--color-muted-ink)',
-                            textDecoration: 'none',
-                            fontSize: 14,
-                            padding: '8px 12px',
-                        }}
-                    >
-                        登录
                     </Link>
                     <Link
                         href="/dashboard"
