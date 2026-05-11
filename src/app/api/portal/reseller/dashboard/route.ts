@@ -34,9 +34,9 @@ function currentMonthBounds(now: Date = new Date()): { start: Date; end: Date } 
 }
 
 export async function GET(req: NextRequest) {
-    const { ctx, response } = await getAuthedReseller(req);
-    if (!ctx) return response;
-    const { reseller } = ctx;
+    const auth = await getAuthedReseller(req);
+    if (!auth.ok) return auth.response;
+    const { reseller } = auth.ctx;
     const { start, end } = currentMonthBounds();
 
     const [thisMonthAgg, customersCount, activeCodesCount, lastSettlement] = await Promise.all([

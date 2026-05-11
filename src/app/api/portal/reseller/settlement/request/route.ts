@@ -43,9 +43,9 @@ function monthBounds(month: string): { start: Date; end: Date } {
 }
 
 export async function POST(req: NextRequest) {
-    const { ctx, response } = await getAuthedReseller(req);
-    if (!ctx) return response;
-    const { reseller } = ctx;
+    const auth = await getAuthedReseller(req);
+    if (!auth.ok) return auth.response;
+    const { reseller } = auth.ctx;
 
     // Settle info required.
     if (!reseller.settle_method || !reseller.settle_account || !reseller.settle_name) {

@@ -23,8 +23,9 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
     if (!id || typeof id !== 'string') {
         return NextResponse.json({ error: 'invalid_id' }, { status: 400 });
     }
-    const { ctx, response } = await getAuthedReseller(req);
-    if (!ctx) return response;
+    const auth = await getAuthedReseller(req);
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
 
     const result = await prisma.resellerInviteCode.updateMany({
         where: {

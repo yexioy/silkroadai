@@ -49,8 +49,9 @@ function deriveDefaultCodeFromEmail(email: string): string {
 }
 
 export async function POST(req: NextRequest) {
-    const { userId, response } = await getAuthedUserId(req);
-    if (!userId) return response;
+    const auth = await getAuthedUserId(req);
+    if (!auth.ok) return auth.response;
+    const { userId } = auth;
 
     let body: unknown = {};
     if (req.headers.get('content-length') !== '0') {

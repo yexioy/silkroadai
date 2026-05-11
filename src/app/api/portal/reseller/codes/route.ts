@@ -30,8 +30,9 @@ const CreateSchema = z.object({
 });
 
 export async function GET(req: NextRequest) {
-    const { ctx, response } = await getAuthedReseller(req);
-    if (!ctx) return response;
+    const auth = await getAuthedReseller(req);
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
 
     const codes = await prisma.resellerInviteCode.findMany({
         where: { reseller_id: ctx.reseller.id },
@@ -93,8 +94,9 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-    const { ctx, response } = await getAuthedReseller(req);
-    if (!ctx) return response;
+    const auth = await getAuthedReseller(req);
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
 
     let body: unknown;
     try {

@@ -34,7 +34,12 @@ const mockSettlementUpdate = vi.fn();
 const mockSettlementCreate = vi.fn();
 const mockCommissionCount = vi.fn();
 const mockCommissionAggregate = vi.fn();
-const mockTransaction = vi.fn(async (cb: (tx: unknown) => Promise<unknown>) =>
+// mockTransaction's implementation invokes the route's callback with a
+// minimal stubbed `tx` surface (just the prisma delegates the /join
+// happy path touches inside the tx). Typed loosely (...args: unknown[])
+// so the spread-into-mock at the $transaction mock site type-checks.
+const mockTransaction = vi.fn();
+mockTransaction.mockImplementation(async (cb: (tx: unknown) => Promise<unknown>) =>
     cb({
         reseller: { create: mockResellerCreate },
         resellerInviteCode: {

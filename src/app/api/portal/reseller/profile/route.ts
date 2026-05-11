@@ -12,9 +12,9 @@ import { getAuthedReseller } from '@/lib/reseller/auth-helper';
 export const runtime = 'nodejs';
 
 export async function GET(req: NextRequest) {
-    const { ctx, response } = await getAuthedReseller(req);
-    if (!ctx) return response;
-    const { reseller } = ctx;
+    const auth = await getAuthedReseller(req);
+    if (!auth.ok) return auth.response;
+    const { reseller } = auth.ctx;
     return NextResponse.json({
         reseller_id: reseller.id,
         user_id: reseller.user_id,

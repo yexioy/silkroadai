@@ -56,8 +56,9 @@ function monthBounds(month: string): { start: Date; end: Date } {
 }
 
 export async function GET(req: NextRequest) {
-    const { ctx, response } = await getAuthedReseller(req);
-    if (!ctx) return response;
+    const auth = await getAuthedReseller(req);
+    if (!auth.ok) return auth.response;
+    const { ctx } = auth;
 
     const url = new URL(req.url);
     const parsed = QuerySchema.safeParse(Object.fromEntries(url.searchParams));

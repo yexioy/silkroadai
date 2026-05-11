@@ -28,41 +28,48 @@ export interface AuthedResellerCtx {
  *   - no session       → 401 invalid_credentials
  *   - user not joined  → 404 not_a_reseller (caller decides whether to expose)
  *
- * Successful path: `{ ctx: { userId, reseller } }`.
+ * Successful path: `{ ok: true, ctx: { userId, reseller } }`.
+ *
+ * The discriminated `ok` literal lets TS narrow the union after a
+ * single `if (!result.ok) return result.response;` so endpoints don't
+ * end up with `NextResponse | null` in their inferred return types.
  */
 export async function getAuthedReseller(
     req: NextRequest,
-): Promise<{ ctx: AuthedResellerCtx; response: null } | { ctx: null; response: NextResponse }> {
+): Promise<{ ok: true; ctx: AuthedResellerCtx } | { ok: false; response: NextResponse }> {
     const user = await getCurrentUser(req);
     if (!user) {
         return {
-            ctx: null,
+            ok: false,
             response: NextResponse.json({ error: 'invalid_credentials' }, { status: 401 }),
         };
     }
     const reseller = await prisma.reseller.findUnique({ where: { user_id: user.id } });
     if (!reseller) {
         return {
-            ctx: null,
+            ok: false,
             response: NextResponse.json({ error: 'not_a_reseller' }, { status: 404 }),
         };
     }
-    return { ctx: { userId: user.id, reseller }, response: null };
+    return { ok: true, ctx: { userId: user.id, reseller } };
 }
 
 /**
  * Resolve current user only — for endpoints (like POST /join) that may
  * not have a reseller row yet.
+ *
+ * Same discriminated-union pattern as getAuthedReseller for clean TS
+ * narrowing at the call site.
  */
 export async function getAuthedUserId(
     req: NextRequest,
-): Promise<{ userId: string; response: null } | { userId: null; response: NextResponse }> {
+): Promise<{ ok: true; userId: string } | { ok: false; response: NextResponse }> {
     const user = await getCurrentUser(req);
     if (!user) {
         return {
-            userId: null,
+            ok: false,
             response: NextResponse.json({ error: 'invalid_credentials' }, { status: 401 }),
         };
     }
-    return { userId: user.id, response: null };
+    return { ok: true, userId: user.id };
 }
