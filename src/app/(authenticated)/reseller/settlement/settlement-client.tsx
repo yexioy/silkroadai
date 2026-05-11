@@ -109,8 +109,8 @@ export function SettlementClient(props: Props) {
                 </CardHeader>
                 <CardContent className="space-y-4">
                     <p className="text-xs text-muted-ink m-0">
-                        客户充值满 14 天进入&ldquo;可结算&rdquo;状态;单次申请满 {fmtCny(minThresholdCny)} 起结,
-                        运营 7 个工作日内打款。
+                        客户充值满 14 天进入&ldquo;可结算&rdquo;状态;单次申请满 {fmtCny(minThresholdCny)} 起结, 运营 7
+                        个工作日内打款。
                     </p>
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
