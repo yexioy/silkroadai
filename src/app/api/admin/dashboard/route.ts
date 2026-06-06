@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { verifyAdminToken, unauthorizedResponse } from '@/lib/admin-auth';
-import { OrderStatus } from '@prisma/client';
+import { OrderStatus, RechargeSource } from '@prisma/client';
 import { BIZ_TZ_NAME, getBizDayStartUTC, toBizDateStr } from '@/lib/time/biz-day';
 
 export async function GET(request: NextRequest) {
@@ -43,6 +43,8 @@ export async function GET(request: NextRequest) {
         dailyRaw,
         leaderboardRaw,
         paymentMethodStats,
+        todayManualRecharge,
+        totalManualRecharge,
     ] = await Promise.all([
         // Today paid aggregate
         prisma.order.aggregate({
@@ -113,6 +115,17 @@ export async function GET(request: NextRequest) {
             _sum: { amount: true },
             _count: { _all: true },
         }),
+        // P2 Part 0: 非支付来源入账(手动充值 / 调整 / 推广,无 Order 行)。
+        // source≠payment 避免与 Order 双算(payment 来源与 Order 一一对应);
+        // amount>0 排除退款 / 负向调整(不把负数当充值)。
+        prisma.rechargeLog.aggregate({
+            where: { source: { not: RechargeSource.payment }, amount: { gt: 0 }, created_at: { gte: todayStart } },
+            _sum: { amount: true },
+        }),
+        prisma.rechargeLog.aggregate({
+            where: { source: { not: RechargeSource.payment }, amount: { gt: 0 } },
+            _sum: { amount: true },
+        }),
     ]);
 
     // Fill missing dates for continuous line chart
@@ -146,6 +159,13 @@ export async function GET(request: NextRequest) {
     const successRate = totalOrders > 0 ? (totalPaidCount / totalOrders) * 100 : 0;
     const avgAmount = totalPaidCount > 0 ? totalPaidAmount / totalPaidCount : 0;
 
+    // P2 Part 0: 把非支付来源的入账(手动充值等)补进「今日/累计充值额」。
+    // successRate / avgAmount 仍按 Order 口径(手动充值无 Order,不进转化率/客单价)。
+    const todayManualAmount = Number(todayManualRecharge._sum?.amount || 0);
+    const totalManualAmount = Number(totalManualRecharge._sum?.amount || 0);
+    const todayRechargeAmount = todayPaidAmount + todayManualAmount;
+    const totalRechargeAmount = totalPaidAmount + totalManualAmount;
+
     // Subscription summary
     const subTodayPaidAmount = Number(subTodayStats._sum?.amount || 0);
     const subTodayPaidCount = subTodayStats._count._all;
@@ -157,8 +177,8 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({
         summary: {
-            today: { amount: todayPaidAmount, orderCount: todayOrders, paidCount: todayPaidCount },
-            total: { amount: totalPaidAmount, orderCount: totalOrders, paidCount: totalPaidCount },
+            today: { amount: todayRechargeAmount, orderCount: todayOrders, paidCount: todayPaidCount },
+            total: { amount: totalRechargeAmount, orderCount: totalOrders, paidCount: totalPaidCount },
             subscriptionToday: { amount: subTodayPaidAmount, orderCount: subTodayOrders, paidCount: subTodayPaidCount },
             subscriptionTotal: { amount: subTotalPaidAmount, orderCount: subTotalOrders, paidCount: subTotalPaidCount },
             successRate: Math.round(successRate * 10) / 10,
