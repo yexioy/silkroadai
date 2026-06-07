@@ -36,9 +36,20 @@ const SUPERADMIN_ROUTES = [
     'provider-instances/[id]/route.ts',
     'subscription-plans/route.ts',
     'subscription-plans/[id]/route.ts',
+    // Write / money-moving / cross-tenant-unsafe ops (operator decision: partner backend
+    // is read-only). refund + user-balance move/expose money; orders cancel/retry are order
+    // writes with NO tenant scope (cross-tenant IDOR if left at admin); litellm/* are W1 leftovers.
+    'refund/route.ts',
+    'user-balance/route.ts',
+    'orders/[id]/cancel/route.ts',
+    'orders/[id]/retry/route.ts',
+    'litellm/groups/route.ts',
+    'litellm/search-users/route.ts',
 ];
 
 // Tenant-scoped reads — stay role≥admin so a partner admin sees THEIR tenant.
+// (orders list + orders/[id] GET detail are tenantScope'd; the cancel/retry WRITES under
+// orders/[id]/ are locked to superadmin above.)
 const TENANT_ADMIN_ROUTES = ['dashboard/route.ts', 'orders/route.ts', 'orders/[id]/route.ts'];
 
 describe('P6b §0 — platform routes locked to superadmin', () => {
