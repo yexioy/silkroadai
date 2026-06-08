@@ -15,6 +15,7 @@ interface Summary {
     costCny: number;
     newapiQuota: number;
     newapiCny: number;
+    matchedNewapiCny: number;
     unmatchedNewapiCny: number;
     diffCny: number;
     diffRate: number | null;
@@ -87,6 +88,8 @@ export function getTexts(locale: Locale) {
                   'Small difference + high coverage → the metering pipeline is trustworthy; the P4c switch can be considered.',
               interpNotReady:
                   'Large difference / low coverage → first price the unpriced models and align catalog to global, then keep observing.',
+              interpDiff:
+                  '"Difference" only compares priced (matched) models — it measures metering/pricing accuracy. Unpriced models do not enter the difference; track them via coverage + unpriced actual.',
               invalidToken: 'Session expired, please sign in again',
               loadFailed: 'Failed to load reconciliation',
               loading: 'Loading...',
@@ -97,6 +100,8 @@ export function getTexts(locale: Locale) {
               portalCost: 'Portal metered (¥)',
               newapiCost: 'new-api actual (¥)',
               diff: 'Difference',
+              diffMatchedNote: ' (priced only)',
+              vsMatched: 'vs priced actual',
               coverage: 'Coverage',
               records: 'records',
               matched: 'matched',
@@ -126,6 +131,8 @@ export function getTexts(locale: Locale) {
               interpWhat: 'portal 假设接管计费会怎么算,对比 new-api 现在实际怎么扣。未生效、不影响客户。',
               interpReady: '差异小 + 覆盖率高 → 计量管道可信,可考虑 P4c 切换。',
               interpNotReady: '差异大 / 覆盖率低 → 先给未定价模型配价、把 catalog 对齐 global,再观察。',
+              interpDiff:
+                  '「差异」只比对齐过价的模型(matched),衡量计量/定价准不准;未配价模型不进差异,单独看覆盖率与未配价实扣。',
               invalidToken: '登录已过期',
               loadFailed: '加载对账报表失败',
               loading: '加载中...',
@@ -136,6 +143,8 @@ export function getTexts(locale: Locale) {
               portalCost: 'portal 计量(¥)',
               newapiCost: 'new-api 实扣(¥)',
               diff: '差异',
+              diffMatchedNote: '(仅已配价)',
+              vsMatched: '对比已配价实扣',
               coverage: '覆盖率',
               records: '记录',
               matched: '已匹配',
@@ -200,6 +209,7 @@ export function ShadowReport({ data, t, isDark }: { data: ShadowData; t: Texts; 
                 <ul className="mt-2 list-disc space-y-1 pl-5">
                     <li>{t.interpReady}</li>
                     <li>{t.interpNotReady}</li>
+                    <li>{t.interpDiff}</li>
                 </ul>
             </div>
 
@@ -223,12 +233,15 @@ export function ShadowReport({ data, t, isDark }: { data: ShadowData; t: Texts; 
                     </div>
                 </div>
                 <div className={`rounded-xl border p-4 ${card}`}>
-                    <div className={`text-xs ${labelCls}`}>{t.diff}</div>
+                    <div className={`text-xs ${labelCls}`}>
+                        {t.diff}
+                        <span className={isDark ? 'text-slate-500' : 'text-slate-400'}>{t.diffMatchedNote}</span>
+                    </div>
                     <div className={`mt-1 text-2xl font-semibold ${isBig(summary.diffRate) ? bigCls : diffNeutral}`}>
                         {fmtSigned(summary.diffCny)}
                     </div>
                     <div className={`mt-1 text-xs ${isBig(summary.diffRate) ? 'text-red-500' : mutedCls}`}>
-                        {fmtPctSigned(summary.diffRate)}
+                        {fmtPctSigned(summary.diffRate)} · {t.vsMatched} {fmt(summary.matchedNewapiCny)}
                     </div>
                 </div>
                 <div className={`rounded-xl border p-4 ${card}`}>

@@ -9,30 +9,34 @@
 `UsageRecord` 每条有 `cost_cny`(portal 按生效 `CatalogPrice` 算的)、`newapi_quota`(new-api 实扣 raw quota)、
 `matched`、`model_slug`/`tier`/tokens/`log_created_at`/`tenant_id`/`user_id`。
 
-| 指标         | 算法                                                                                |
-| ------------ | ----------------------------------------------------------------------------------- |
-| portal 成本  | `Σ cost_cny`,**仅 `matched=true`**(未配价记录 `cost_cny=0`,口径上排除)              |
-| new-api 实扣 | `Σ newapi_quota`(全部记录)经 `quotaToCny` 折 ¥(走 `quota-units.ts`,不另写 FX)       |
-| 差异         | portal 成本 − new-api 实扣(¥ 和 %)                                                  |
-| 覆盖率       | `matched 记录数 / 总记录数`(`matched=false` = 还没配价 / 仅图片,算不出 portal 成本) |
+| 指标                  | 算法                                                                                |
+| --------------------- | ----------------------------------------------------------------------------------- |
+| portal 成本           | `Σ cost_cny`,**仅 `matched=true`**(未配价记录 `cost_cny=0`,口径上排除)              |
+| new-api 实扣(全)      | `Σ newapi_quota`(全部记录)经 `quotaToCny` 折 ¥(总量参考;`quota-units.ts`,不另写 FX) |
+| new-api 实扣(matched) | `Σ newapi_quota where matched`,折 ¥(`matchedNewapiCny`,头条/下钻差异的对比基)       |
+| **头条差异**          | portal 成本 − new-api 实扣(matched)(¥ 和 %)—— **matched-vs-matched**                |
+| 覆盖率                | `matched 记录数 / 总记录数`(`matched=false` = 还没配价 / 仅图片,算不出 portal 成本) |
 
-**为什么差异里含覆盖缺口**:portal 成本只算 matched,new-api 实扣算全部。覆盖率低时,
-未配价调用被 new-api 计费但 portal 记 0 → 差异自然偏大。所以「差异小」必须配「覆盖率高」才成立 ——
-这正是 P4c 就绪判据(见下)。覆盖率到 100% 时,headline 差异 = 纯计量校准差异(口径对齐)。
+**差异为何只比 matched(review 修订)**:P4b 要验的是"对齐过价的模型,我们算的准不准"—— 计量/定价精度。
+若未配价模型进差异,头条会被覆盖缺口主导,掩盖真正的精度信号。所以头条 + 每个下钻行的差异都是
+**matched-vs-matched**(portal matched 成本 vs new-api matched 侧实扣),未配价模型不进差异。
+覆盖缺口单独由「覆盖率」+「未配价占实扣」承载 —— **「差异」看精度、「覆盖率/未配价」看缺口,两个信号分开**。
+P4c 就绪 = 差异小(精度够)且 覆盖率高(缺口小),两者都达标。
 
 ## 报表内容(`/admin/billing-shadow`)
 
 时间窗 `?period=7d|30d|all`(白名单,默认 **30d**)。
 
-- **汇总卡**:portal 总成本 ¥ / new-api 实扣总 ¥ / 差异 ¥+% / 覆盖率(matched%)。覆盖率卡副行显示「其中未配价占实扣 ¥X」。
+- **汇总卡**:portal 总成本 ¥ / new-api 实扣总 ¥(全部) / 差异 ¥+%【**仅已配价**,副行标「对比已配价实扣 ¥X」】/ 覆盖率(matched%,副行「其中未配价占实扣 ¥X」)。
 - **未配价高亮**:`matched=false` 聚合成 chips,每个带 model×tier·调用数·**该项占的 new-api 实扣 ¥**(按实扣降序 = operator 待配价优先级)。
-- **按模型 × 档次**:每行 model/tier / 调用数 / **匹配率** / portal ¥ / new-api ¥ / **差异 ¥+%**。按调用量降序;`|差异%| > 10%` 的行标红;匹配率 <100% 标黄。
+- **按模型 × 档次**:每行 model/tier / 调用数 / **匹配率** / portal ¥ / new-api ¥(全部) / **差异 ¥+%(matched-vs-matched)**。按调用量降序;`|差异%| > 10%` 的行标红;匹配率 <100% 标黄。
 - **按租户**(仅 >1 租户时显示):superadmin 的跨租户视图;partner admin 经 `tenantScope` 自然只看自己一行。
-- **按客户**:email / 调用数 / portal ¥ / new-api ¥ / 差异 ¥+%。
+- **按客户**:email / 调用数 / portal ¥ / new-api ¥(全部) / 差异 ¥+%(matched-vs-matched)。
 
 ## 怎么读 / P4c 就绪判据
 
 - **这是影子数据** —— portal 假设接管计费会怎么算,对比 new-api 现在实际怎么扣。未生效、不影响客户。
+- **「差异」只比对齐过价的模型(matched)**,衡量计量/定价准不准;未配价模型不进差异,单独看覆盖率与未配价实扣。
 - **差异小 + 覆盖率高** → 计量管道可信,可考虑 P4c 切换。
 - **差异大 / 覆盖率低** → 先给未定价模型配价、把 catalog 对齐 global,再继续观察。
 
