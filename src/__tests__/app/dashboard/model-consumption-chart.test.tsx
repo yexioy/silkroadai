@@ -18,7 +18,7 @@ describe('<ModelConsumptionChart /> SSR', () => {
     });
 
     it('with stacked data (incl 其他) → renders without throwing', () => {
-        const byDay = [
+        const byDay: Array<{ date: string; values: Record<string, number> }> = [
             { date: '2026-06-01', values: { 'gpt-5.4': 400_000, 其他: 50_000 } },
             { date: '2026-06-02', values: { 'gpt-5.4': 100_000 } },
         ];
