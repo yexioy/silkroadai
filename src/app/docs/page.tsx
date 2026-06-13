@@ -888,7 +888,9 @@ console.log(completion.choices[0].message.content);`}
                                     <td className="px-4 py-3 font-mono text-xs text-navy align-top">
                                         gemini-3-pro-image-preview
                                     </td>
-                                    <td className="px-4 py-3 text-navy align-top font-medium">4096×4096(4K)</td>
+                                    <td className="px-4 py-3 text-navy align-top font-medium">
+                                        4096×4096(4K)· 可选 2K
+                                    </td>
                                     <td className="px-4 py-3 text-navy align-top font-medium">¥0.50 / 张</td>
                                     <td className="px-4 py-3 text-ink">旗舰,最高画质</td>
                                 </tr>
@@ -976,6 +978,46 @@ print(resp.data[0].b64_json)   # 或 resp.data[0].url`}
                             /v1beta/models/&lt;model&gt;:generateContent
                         </code>{' '}
                         endpoint(默认比例 1:1)。
+                    </div>
+
+                    <div className="mt-3 mb-3 rounded-lg border-l-4 border-brand-border bg-paper-muted px-4 py-3 text-sm text-ink">
+                        🎚️ <strong className="text-navy">让旗舰 pro 出 2K(而非默认 4K)</strong>:在 OpenAI 兼容请求(
+                        <code className="font-mono text-xs bg-surface px-1.5 py-0.5 rounded border border-brand-border text-navy">
+                            /v1/chat/completions
+                        </code>{' '}
+                        或{' '}
+                        <code className="font-mono text-xs bg-surface px-1.5 py-0.5 rounded border border-brand-border text-navy">
+                            /v1/images/generations
+                        </code>
+                        )里加{' '}
+                        <code className="font-mono text-xs bg-surface px-1.5 py-0.5 rounded border border-brand-border text-navy">
+                            {`"size": "2K"`}
+                        </code>
+                        (或{' '}
+                        <code className="font-mono text-xs bg-surface px-1.5 py-0.5 rounded border border-brand-border text-navy">
+                            &quot;4K&quot;
+                        </code>
+                        ,也认{' '}
+                        <code className="font-mono text-xs bg-surface px-1.5 py-0.5 rounded border border-brand-border text-navy">
+                            2048x2048
+                        </code>{' '}
+                        /{' '}
+                        <code className="font-mono text-xs bg-surface px-1.5 py-0.5 rounded border border-brand-border text-navy">
+                            4096x4096
+                        </code>
+                        );不传仍是 4K。适合更小文件 / 更快下载 / 指定 2K 尺寸的场景。
+                        <span className="block mt-1.5 text-xs text-minor-ink">
+                            注意:<strong className="text-navy">价格按模型固定,与尺寸无关</strong> —— pro 出 2K 仍是
+                            ¥0.50 / 张。需要更便宜的 2K 请直接用{' '}
+                            <code className="font-mono text-xs bg-surface px-1.5 py-0.5 rounded border border-brand-border text-navy">
+                                gemini-3.1-flash-image-preview
+                            </code>
+                            (¥0.20 / 张)。
+                            <code className="font-mono text-xs bg-surface px-1.5 py-0.5 rounded border border-brand-border text-navy">
+                                size
+                            </code>{' '}
+                            仅 pro 生效,其余生图模型忽略。
+                        </span>
                     </div>
 
                     <p className="m-0 mt-4 mb-2 text-sm font-medium text-navy">Gemini 原生 API · curl(2K / 4K)</p>
