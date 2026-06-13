@@ -70,6 +70,9 @@ const GEMINI_IMAGE_MODELS: Record<string, '1K' | '2K' | '4K'> = {
     'gemini-2.5-flash-image': '1K',
     'gemini-3.1-flash-image-preview': '2K',
     'gemini-3-pro-image-preview': '4K',
+    // 折扣 SKU:= pro 锁 2K(size 参数对它无效),new-api 单独计 ¥0.30(4K 原名仍 ¥0.50)。
+    // model_mapping(ch#24/#17)把它翻回 gemini-3-pro-image-preview 给上游。见 configure-pro-2k-sku.mjs。
+    'gemini-3-pro-image-preview-2k': '2K',
 };
 
 /** 仅这些模型允许客户用 `size` 选 imageSize(其余按 GEMINI_IMAGE_MODELS 固定档,size 被忽略)。
@@ -134,6 +137,8 @@ const GEMINI_ASPECT_RATIOS: Record<string, ReadonlySet<string>> = {
         '8:1',
     ]),
 };
+// 折扣 SKU 与 pro 同源 → 复用 pro 档的 aspect_ratio 白名单(否则 allowed.has 会在 undefined 上抛)
+GEMINI_ASPECT_RATIOS['gemini-3-pro-image-preview-2k'] = GEMINI_ASPECT_RATIOS['gemini-3-pro-image-preview'];
 
 const CLAUDE_MAX_TOKENS_CAP = 4096;
 

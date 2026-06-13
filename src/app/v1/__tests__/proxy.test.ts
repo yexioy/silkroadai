@@ -1140,4 +1140,59 @@ describe('/v1 proxy — pro imageSize 可选 (size param, feat/pro-image-size-se
         expect(data.error.type).toBe('invalid_request_error');
         expect(mockFetch).not.toHaveBeenCalled();
     });
+
+    // ── 折扣 SKU gemini-3-pro-image-preview-2k(锁 2K @ ¥0.30,new-api 单独计费)──
+    it('折扣 SKU → 锁 2K + native URL 用【别名】(new-api 据此按 ¥0.30 计费,不是真名 ¥0.50)', async () => {
+        mockFetch.mockResolvedValueOnce(geminiNativeResponse());
+        const res = await POST(
+            makeReq('/images/generations', {
+                body: { model: 'gemini-3-pro-image-preview-2k', prompt: 'x' },
+            }),
+            ctx('images', 'generations'),
+        );
+        expect(res.status).toBe(200);
+        const call = mockFetch.mock.calls.find(([u]) => String(u).includes(':generateContent'));
+        expect(call).toBeDefined();
+        // 关键:打到 new-api 的 model 必须是别名(new-api model_mapping 再翻回真名给上游)。
+        // 若这里误用真名,new-api 会按 ¥0.50 计费,折扣 SKU 形同虚设。
+        expect(String(call![0])).toBe(`${NEWAPI_BASE}/v1beta/models/gemini-3-pro-image-preview-2k:generateContent`);
+        expect(sentImageSize()).toBe('2K');
+    });
+
+    it('折扣 SKU 忽略 size 参数(锁 2K):传 size=4K → 仍 2K', async () => {
+        mockFetch.mockResolvedValueOnce(geminiNativeResponse());
+        await POST(
+            makeReq('/images/generations', {
+                body: { model: 'gemini-3-pro-image-preview-2k', prompt: 'x', size: '4K' },
+            }),
+            ctx('images', 'generations'),
+        );
+        expect(sentImageSize()).toBe('2K');
+    });
+
+    it('折扣 SKU 走 chat/completions 也锁 2K', async () => {
+        mockFetch.mockResolvedValueOnce(geminiNativeResponse());
+        const res = await POST(
+            makeReq('/chat/completions', {
+                body: { model: 'gemini-3-pro-image-preview-2k', messages: [{ role: 'user', content: 'a cat' }] },
+            }),
+            ctx('chat', 'completions'),
+        );
+        expect(res.status).toBe(200);
+        expect(sentImageSize()).toBe('2K');
+    });
+
+    it('折扣 SKU 复用 pro 档比例白名单(pro 独有 8:1 通过,不 400)', async () => {
+        mockFetch.mockResolvedValueOnce(geminiNativeResponse());
+        const res = await POST(
+            makeReq('/images/generations', {
+                body: { model: 'gemini-3-pro-image-preview-2k', prompt: 'x', aspect_ratio: '8:1' },
+            }),
+            ctx('images', 'generations'),
+        );
+        expect(res.status).toBe(200);
+        const [, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+        const sent = JSON.parse(String(init.body)) as { generationConfig: { imageConfig: { aspectRatio: string } } };
+        expect(sent.generationConfig.imageConfig.aspectRatio).toBe('8:1');
+    });
 });
