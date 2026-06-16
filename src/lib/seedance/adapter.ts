@@ -105,10 +105,12 @@ async function toHttpImageUrl(url: string): Promise<string> {
         throw new Error('image must be an http(s) URL or a base64 data URL');
     }
     const mime = m[1];
-    const ext = mime.split('/')[1].replace('jpeg', 'jpg');
     const buf = Buffer.from(m[2], 'base64');
     if (buf.length > 20 * 1024 * 1024) throw new Error('image exceeds 20MB');
-    const r2url = await uploadImage(`seedance-ref/${randomUUID()}.${ext}`, buf, mime);
+    // ⚠️ NO file extension on the R2 key: service-inference.ai 的 asset 抓取器对
+    // URL 末尾 `.jpg` 扩展名会走坏分支报 "Asset provider error"(`.png` / 无扩展名正常,
+    // 实测 2026-06-16)。无扩展名 key + R2 对象正确 content-type(picsum 同款)对所有格式都通。
+    const r2url = await uploadImage(`seedance-ref/${randomUUID()}`, buf, mime);
     console.log('[seedance-adapter] r2 upload', { mime, bytes: buf.length, url: r2url });
     return r2url;
 }
