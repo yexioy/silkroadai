@@ -145,6 +145,16 @@ function mapStatus(s: unknown): 'queued' | 'in_progress' | 'completed' | 'failed
     return 'in_progress';
 }
 
+/** ISO 串 / 毫秒 / 秒 → Unix 秒整数(new-api responseTask.created_at 是 int64,不能给字符串)。 */
+function toEpoch(v: unknown): number {
+    if (typeof v === 'number') return v > 1e12 ? Math.floor(v / 1000) : Math.floor(v);
+    if (typeof v === 'string') {
+        const t = Date.parse(v);
+        if (Number.isFinite(t)) return Math.floor(t / 1000);
+    }
+    return Math.floor(Date.now() / 1000);
+}
+
 /** GET 轮询:service-inference.ai /v1/video/tasks/{id} → OpenAI-video 形。 */
 export async function pollVideo(req: NextRequest, id: string): Promise<NextResponse> {
     const auth = req.headers.get('authorization') || '';
@@ -183,8 +193,8 @@ export async function pollVideo(req: NextRequest, id: string): Promise<NextRespo
             model: task.model,
             status,
             progress: status === 'completed' || status === 'failed' ? 100 : 50,
-            created_at: task.created_at ?? null,
-            completed_at: task.completed_at ?? null,
+            created_at: toEpoch(task.created_at),
+            completed_at: task.completed_at ? toEpoch(task.completed_at) : null,
             seconds: task.duration_seconds ?? null,
             video_url: videoUrl,
             data: videoUrl ? { video_url: videoUrl } : undefined,
