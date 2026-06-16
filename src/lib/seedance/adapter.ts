@@ -108,7 +108,9 @@ async function toHttpImageUrl(url: string): Promise<string> {
     const ext = mime.split('/')[1].replace('jpeg', 'jpg');
     const buf = Buffer.from(m[2], 'base64');
     if (buf.length > 20 * 1024 * 1024) throw new Error('image exceeds 20MB');
-    return uploadImage(`seedance-ref/${randomUUID()}.${ext}`, buf, mime);
+    const r2url = await uploadImage(`seedance-ref/${randomUUID()}.${ext}`, buf, mime);
+    console.log('[seedance-adapter] r2 upload', { mime, bytes: buf.length, url: r2url });
+    return r2url;
 }
 
 /** 把一张 http 图传成 service-inference.ai 的 asset,轮询到 completed,返回 asset_id。 */
@@ -126,7 +128,14 @@ async function uploadAndReadyAsset(auth: string, groupId: string, httpUrl: strin
         throw new Error(`asset upload bad response: ${upText.slice(0, 120)}`);
     }
     const assetId = upJson.id;
-    if (!up.ok || !assetId) throw new Error(`asset upload failed (${up.status}): ${upText.slice(0, 160)}`);
+    if (!up.ok || !assetId) {
+        console.warn('[seedance-adapter] /v1/assets reject', {
+            url: httpUrl,
+            status: up.status,
+            body: upText.slice(0, 200),
+        });
+        throw new Error(`asset upload failed (${up.status}): ${upText.slice(0, 160)}`);
+    }
     // poll until completed (~资产把图下载落地;实测数秒~数十秒)
     const deadline = Date.now() + 75_000;
     while (Date.now() < deadline) {
