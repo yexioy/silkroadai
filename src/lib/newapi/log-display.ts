@@ -42,7 +42,7 @@ export function sanitizeLogContent(content: string): string {
     if (/负载已饱和|overloaded|do request failed|temporarily unavailable|no available channel|\b429\b/.test(c)) {
         return '服务繁忙,请稍后重试';
     }
-    return content.replace(/\b(adobe|we-token|zhiyunai|nexaxis|amutes|vakv|midou|czeq)\b/gi, '上游');
+    return content.replace(/\b(adobe|firefly|we-token|zhiyunai|nexaxis|amutes|vakv|midou|czeq)\b/gi, '上游');
 }
 
 /** 名字看着像不像生图模型(粗粒度启发式)。仅当日志行缺 `other`/model_price 时,`isPerImageBilled`

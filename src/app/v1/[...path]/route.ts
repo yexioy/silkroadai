@@ -855,7 +855,7 @@ function sanitizeImageErrorBody(text: string): string {
             },
         });
     }
-    return text.replace(/\badobe\b/gi, 'the provider');
+    return text.replace(/\b(adobe|firefly|we-token|zhiyunai|nexaxis|amutes|vakv|midou|czeq)\b/gi, 'the provider');
 }
 
 /** gpt-image-2 是图片模型,zhiyunai/Azure 只支持 Images 接口 —— 客户用 /v1/chat/completions

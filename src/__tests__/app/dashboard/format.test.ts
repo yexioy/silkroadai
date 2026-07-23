@@ -137,6 +137,9 @@ describe('sanitizeLogContent', () => {
 
     it('兜底:抹掉残留上游品牌名', () => {
         expect(sanitizeLogContent('failed via zhiyunai gateway').toLowerCase()).not.toContain('zhiyunai');
+        const firefly = sanitizeLogContent('Firefly Services quota exceeded').toLowerCase();
+        expect(firefly).not.toContain('firefly');
+        expect(firefly).toContain('上游');
     });
 
     it('普通 / 空内容不误伤', () => {
