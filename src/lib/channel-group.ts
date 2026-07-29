@@ -12,6 +12,11 @@ import { getOption } from '@/lib/newapi/client';
 //     已发 key 的 NewApiToken.tier / User.allowed_tier_keys 全不受影响)
 //   - new-api 新增的组 → 自动建行(key = 组名 slug,排到现有档次末尾)
 //   - new-api 删掉的组 → enabled=false 软下架(老 key 照常工作,新建选不到)
+//   - 显示名以 "@" 开头 = 隐藏组:保留在 UserUsableGroups(new-api 建 token 的
+//     门,studio / chat 内部建 key 还要过它)但不对客户展示 —— 对应行软下架、
+//     也不自动建行。运维在 new-api 里给显示名加/去 "@" 即可隐/显。
+//   - 同一 newapi_group 对应多行 portal 档(如 geminit3 与 pool 都指 default)
+//     → 只管 enabled,不动 display_name(保留 portal 侧的别名区分)
 //   - tier_level / is_default / description 仍归 portal 管,不被同步覆盖
 // 防御:option 缺失 / JSON 坏 / 字典为空(疑似误清)→ 跳过本轮,DB 现状兜底。
 // ─────────────────────────────────────────────────────────────────────────
@@ -47,11 +52,15 @@ async function runSync(): Promise<void> {
         return;
     }
     const live = new Map<string, string>();
+    let sawAnyEntry = false;
     for (const [group, name] of Object.entries(parsed as Record<string, unknown>)) {
         if (!group.trim() || typeof name !== 'string') continue;
-        live.set(group, name.trim() || group);
+        sawAnyEntry = true;
+        const trimmed = name.trim();
+        if (trimmed.startsWith('@')) continue; // "@" 前缀 = 内部组,不对客户展示
+        live.set(group, trimmed || group);
     }
-    if (live.size === 0) {
+    if (!sawAnyEntry) {
         // 全空 = 大概率运维误清,不整锅下架(那会让建 key 全挂)。
         console.warn('[channel-group] UserUsableGroups is empty — skipping sync (keeping current tiers)');
         return;
@@ -62,13 +71,20 @@ async function runSync(): Promise<void> {
     const usedKeys = new Set(rows.map((r) => r.key));
     let nextLevel = rows.reduce((max, r) => Math.max(max, r.tier_level), -1) + 1;
     const covered = new Set<string>();
+    const rowsPerGroup = new Map<string, number>();
+    for (const row of rows) {
+        rowsPerGroup.set(row.newapi_group, (rowsPerGroup.get(row.newapi_group) ?? 0) + 1);
+    }
 
     for (const row of rows) {
         const name = live.get(row.newapi_group);
         if (name !== undefined) {
             covered.add(row.newapi_group);
             const data: { display_name?: string; enabled?: boolean } = {};
-            if (row.display_name !== name) data.display_name = name;
+            // 多行共用一个 newapi_group(portal 侧别名,如 geminit3/pool 都指
+            // default)时不动 display_name,否则会把别名改成同一个名字。
+            const soleRowForGroup = rowsPerGroup.get(row.newapi_group) === 1;
+            if (soleRowForGroup && row.display_name !== name) data.display_name = name;
             if (!row.enabled) data.enabled = true;
             if (Object.keys(data).length > 0) {
                 ops.push(prisma.channelGroup.update({ where: { id: row.id }, data }));

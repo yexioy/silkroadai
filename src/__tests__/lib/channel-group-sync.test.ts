@@ -80,9 +80,7 @@ describe('syncChannelGroupsFromNewApi', () => {
         mockFindMany.mockResolvedValue([
             row({ id: 'id-1', key: 'pool', newapi_group: 'default', display_name: '默认分组', tier_level: 3 }),
         ]);
-        mockGetOption.mockResolvedValue(
-            JSON.stringify({ 'default': '默认分组', 'ccmax 蒸馏': 'Claude官方稳定' }),
-        );
+        mockGetOption.mockResolvedValue(JSON.stringify({ default: '默认分组', 'ccmax 蒸馏': 'Claude官方稳定' }));
 
         await syncChannelGroupsFromNewApi();
 
@@ -103,11 +101,16 @@ describe('syncChannelGroupsFromNewApi', () => {
     it('suffixes the slug key when it collides with an existing portal key', async () => {
         mockFindMany.mockResolvedValue([
             row({ id: 'id-1', key: 'official', newapi_group: 'ccmax 蒸馏', display_name: '官方稳定', tier_level: 0 }),
-            row({ id: 'id-2', key: 'newgrp', newapi_group: 'legacy', display_name: '旧组', tier_level: 1, enabled: false }),
+            row({
+                id: 'id-2',
+                key: 'newgrp',
+                newapi_group: 'legacy',
+                display_name: '旧组',
+                tier_level: 1,
+                enabled: false,
+            }),
         ]);
-        mockGetOption.mockResolvedValue(
-            JSON.stringify({ 'ccmax 蒸馏': '官方稳定', 'NewGrp': '新组' }),
-        );
+        mockGetOption.mockResolvedValue(JSON.stringify({ 'ccmax 蒸馏': '官方稳定', NewGrp: '新组' }));
 
         await syncChannelGroupsFromNewApi();
 
@@ -128,6 +131,37 @@ describe('syncChannelGroupsFromNewApi', () => {
 
         expect(mockUpdate).toHaveBeenCalledTimes(1);
         expect(mockUpdate).toHaveBeenCalledWith({ where: { id: 'id-2' }, data: { enabled: false } });
+    });
+
+    it('"@"-prefixed display name = hidden group: disables matching rows and never creates one', async () => {
+        mockFindMany.mockResolvedValue([
+            row({ id: 'id-1', key: 'pool', newapi_group: 'default', display_name: '默认分组' }),
+            row({ id: 'id-2', key: 'image2', newapi_group: 'image2', display_name: 'GPT 生图', enabled: true }),
+        ]);
+        mockGetOption.mockResolvedValue(
+            JSON.stringify({ default: '默认分组', image2: '@GPT 生图', 'internal-new': '@内部新组' }),
+        );
+
+        await syncChannelGroupsFromNewApi();
+
+        expect(mockUpdate).toHaveBeenCalledTimes(1);
+        expect(mockUpdate).toHaveBeenCalledWith({ where: { id: 'id-2' }, data: { enabled: false } });
+        expect(mockCreate).not.toHaveBeenCalled();
+    });
+
+    it('multiple portal rows sharing one newapi_group keep their distinct display names (only enabled is managed)', async () => {
+        mockFindMany.mockResolvedValue([
+            row({ id: 'id-1', key: 'pool', newapi_group: 'default', display_name: '默认（号池为主）' }),
+            row({ id: 'id-2', key: 'geminit3', newapi_group: 'default', display_name: 'geminit3', enabled: false }),
+        ]);
+        mockGetOption.mockResolvedValue(JSON.stringify({ default: '默认分组' }));
+
+        await syncChannelGroupsFromNewApi();
+
+        // 别名行只被复活,谁都不被改名成「默认分组」。
+        expect(mockUpdate).toHaveBeenCalledTimes(1);
+        expect(mockUpdate).toHaveBeenCalledWith({ where: { id: 'id-2' }, data: { enabled: true } });
+        expect(mockCreate).not.toHaveBeenCalled();
     });
 
     it('is a no-op when everything already matches', async () => {
