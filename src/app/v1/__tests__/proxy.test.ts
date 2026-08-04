@@ -2574,6 +2574,28 @@ describe('/v1 proxy — 非 Gemini 图片(gpt-image-2)透传整形 + 估算 usag
         expect(data.error.type).toBe('invalid_request_error');
     });
 
+    it('非内容安全错误里带 firefly / we-token 品牌名 → 兜底抹成 the provider,状态码/结构原样', async () => {
+        mockFetch.mockResolvedValueOnce(
+            new Response(
+                JSON.stringify({
+                    error: { message: 'Firefly Services quota exceeded for we-token.cc account', type: 'api_error' },
+                }),
+                { status: 429, headers: { 'content-type': 'application/json' } },
+            ),
+        );
+        const res = await POST(
+            makeReq('/images/generations', { body: { model: 'gpt-image-2', prompt: 'x' } }),
+            ctx('images', 'generations'),
+        );
+        expect(res.status).toBe(429); // 非内容安全 → 不改写信封,状态码透传
+        const text = await res.text();
+        expect(text.toLowerCase()).not.toContain('firefly');
+        expect(text.toLowerCase()).not.toContain('we-token');
+        const data = JSON.parse(text) as { error: { message: string; type: string } };
+        expect(data.error.type).toBe('api_error'); // 结构原样,仅抹品牌名
+        expect(data.error.message).toContain('the provider');
+    });
+
     it('连不上 new-api(网络异常)→ 502 透出真实原因,不被兜底成笼统 400', async () => {
         mockFetch.mockRejectedValueOnce(new Error('ECONNREFUSED'));
         const res = await POST(
