@@ -7,19 +7,25 @@
  *   POST {BASE}/ai-open-platform-api/api/support/v1/asset?Action=<Action>&Version=2024-01-01
  *   鉴权 `ApiKey: kz-…` 自定义请求头(**不是** Bearer —— 视频面才是 Bearer)
  *
- * ⚠️ 默认【不启用】。平台素材库(assets.ts,字节存我们 R2 + user_id 行级归属)仍是唯一
- * 生效实现 —— 2026-08-06 operator 拍板「全部素材统一平台托管」,四渠道通用。本模块是把
- * 筷子自有素材库接进来的开关式实现:置 `ENTERPRISE_KUAIZI_ASSETS=1` 后,volc 渠道客户的
- * 10 个素材 Action 转发到筷子;不置(缺省)则一切照旧。
+ * 【默认启用】(operator 2026-08-17 拍板:火山渠道就是给**单个客户**用的)——
+ * volc 渠道客户的 10 个素材 Action 转发到筷子自有素材库,与视频面同一个筷子账号自洽
+ * (`asset://<Id>` 引用上游能直接解析,不必经我们转 R2 直链)。
+ * 非 volc 渠道(cn / global / promax)不受影响,照旧走平台素材库(assets.ts,字节存我们
+ * R2 + user_id 行级归属,2026-08-06 拍板的统一托管)。
  *
- * 启用后的取舍(operator 拍板前不要开):
- *  - 筷子素材库按 **ApiKey 账号** 归属,我们全平台共用一把 key → volc 客户之间**互相可见**,
- *    没有 user_id 行级隔离。多 volc 客户场景下这是实打实的越权风险,单客户独占才可用。
- *  - 客户此前存在平台库(R2)的素材不会出现在列表里(两套库各自独立)。
- *  - 素材 URL 是筷子签名链,约 12h 过期(平台库是永久 R2 直链)。
+ * ⚠️ 关掉的开关:`ENTERPRISE_KUAIZI_ASSETS=0`(回落平台素材库)。**要关的唯一场景 = 火山
+ * 渠道接入第二个客户** —— 筷子素材库按 **ApiKey 账号** 归属,我们全平台共用一把 key,
+ * 多个 volc 客户会**互相可见**,没有 user_id 行级隔离。单客户独占时这不是问题。
  *
- * 未启用时,volc 生成里的 `asset://<id>` 走 proxy 的 lenient 混合解析:平台库素材换 R2 直链,
- * 认不出的引用整串透传给上游解析 —— 所以客户在筷子侧自行创建的素材 id 本来就能用。
+ * 其余取舍(已知,单客户场景可接受):
+ *  - volc 客户此前存在平台库(R2)的素材不会出现在列表里(两套库各自独立);按 Id 操作
+ *    也不会回落平台库 —— 存量素材需重新上传到筷子侧。
+ *  - 素材 URL 是筷子签名链,约 12h 过期(平台库是永久 R2 直链)→ 客户脚本别缓存 URL,
+ *    用时现查 GetAsset。
+ *  - CreateAsset 是**异步**的:落库即返 Id,需轮询 GetAsset 到 `Status=Active` 才可用。
+ *
+ * 关掉后,volc 生成里的 `asset://<id>` 走 proxy 的 lenient 混合解析:平台库素材换 R2 直链,
+ * 认不出的引用整串透传给上游解析 —— 所以客户在筷子侧自建的素材 id 那时也仍然能用。
  */
 import 'server-only';
 import { z } from 'zod';
@@ -29,9 +35,10 @@ const DEFAULT_BASE = 'https://aiopenapi.kuaizi.cn';
 const ASSET_PATH = '/ai-open-platform-api/api/support/v1/asset';
 const VERSION = '2024-01-01';
 
-/** 是否启用筷子素材库接管(缺省关,见文件头取舍说明)。 */
+/** 是否启用筷子素材库接管(**缺省开**;`ENTERPRISE_KUAIZI_ASSETS=0` 才回落平台库)。
+ *  见文件头:要关的唯一场景是火山渠道接入第二个客户(共享 ApiKey 账号无行级隔离)。 */
 export function kuaiziAssetsEnabled(): boolean {
-    return process.env.ENTERPRISE_KUAIZI_ASSETS === '1';
+    return process.env.ENTERPRISE_KUAIZI_ASSETS !== '0';
 }
 
 function getConfig(): { base: string; key: string } {
@@ -245,6 +252,34 @@ export async function handleKuaiziAssetAction(action: string, body: unknown): Pr
         default:
             throw new RealPersonError(400, 'InvalidAction', `不支持的 Action: ${action}`);
     }
+}
+
+/**
+ * volc 客户的这次素材 Action 该不该走筷子?(route 层分流,沿用 #328 的 id 命名空间规则)
+ *
+ * 缺省走筷子,但三种情况回落平台素材库 —— 否则会打断既有能力:
+ *  ① **真人素材**(显式 `GroupType=LivenessFace`,顶层或 Filter 内):真人素材四渠道通用、
+ *    平台托管(#329),且筷子只支持 AIGC 组 —— 转过去必 400,真人认证线会断。
+ *  ② **平台形 Id**(`asset-…` / `group-…`):volc 客户的存量平台素材按 Id 仍可 CRUD;
+ *    筷子 Id 是十进制数字串,两者天然可辨(#328 同款判据)。
+ *  ③ **CreateAsset 指定了平台形 GroupId**:往存量平台组里加素材,跟着组走。
+ */
+export function shouldUseKuaiziAssets(action: string, body: unknown): boolean {
+    if (!KUAIZI_ASSET_ACTIONS.has(action)) return false;
+    const b = (body ?? {}) as {
+        GroupType?: unknown;
+        Filter?: { GroupType?: unknown };
+        Id?: unknown;
+        GroupId?: unknown;
+    };
+    if (b.GroupType === 'LivenessFace' || b.Filter?.GroupType === 'LivenessFace') return false;
+    if (isPlatformAssetId(b.Id) || isPlatformAssetId(b.GroupId)) return false;
+    return true;
+}
+
+/** 平台库 id 形(`asset-YYYYMMDDHHMMSS-xxxxxx` / `group-…`);筷子 id 是纯十进制串。 */
+function isPlatformAssetId(v: unknown): boolean {
+    return typeof v === 'string' && (v.startsWith('asset-') || v.startsWith('group-'));
 }
 
 /** 筷子素材库接管的 Action 集合(route 层据此在 volc 客户上分流)。 */

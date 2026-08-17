@@ -1,6 +1,11 @@
 /** 筷子开放平台素材库适配单测:Action 转发 + ApiKey 头 + 信封拆装 + 错误映射 + 开关。 */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { handleKuaiziAssetAction, kuaiziAssetsEnabled, KUAIZI_ASSET_ACTIONS } from '../kuaizi-assets';
+import {
+    handleKuaiziAssetAction,
+    kuaiziAssetsEnabled,
+    shouldUseKuaiziAssets,
+    KUAIZI_ASSET_ACTIONS,
+} from '../kuaizi-assets';
 import { RealPersonError } from '../real-person';
 
 const BASE = 'http://kuaizi.test';
@@ -21,7 +26,9 @@ afterEach(() => {
 });
 
 describe('kuaiziAssetsEnabled', () => {
-    it('缺省关(平台库仍是唯一生效实现);置 1 才开', () => {
+    it('缺省开(火山渠道单客户专属);置 "0" 才回落平台库', () => {
+        expect(kuaiziAssetsEnabled()).toBe(true);
+        process.env.ENTERPRISE_KUAIZI_ASSETS = '0';
         expect(kuaiziAssetsEnabled()).toBe(false);
         process.env.ENTERPRISE_KUAIZI_ASSETS = '1';
         expect(kuaiziAssetsEnabled()).toBe(true);
@@ -32,6 +39,38 @@ describe('kuaiziAssetsEnabled', () => {
         expect(KUAIZI_ASSET_ACTIONS.has('ListAssetGroups')).toBe(true);
         // 真人认证不归素材库接管
         expect(KUAIZI_ASSET_ACTIONS.has('CreateVisualValidateSession')).toBe(false);
+    });
+});
+
+describe('shouldUseKuaiziAssets —— volc 客户的分流规则', () => {
+    it('缺省(AIGC / 无 id)走筷子', () => {
+        expect(shouldUseKuaiziAssets('ListAssets', {})).toBe(true);
+        expect(shouldUseKuaiziAssets('CreateAssetGroup', { Name: 'g', GroupType: 'AIGC' })).toBe(true);
+        expect(shouldUseKuaiziAssets('GetAsset', { Id: '1800657071180349888' })).toBe(true);
+    });
+
+    it('真人素材(LivenessFace)回落平台库 —— 四渠道通用 + 筷子只支持 AIGC,转过去必 400', () => {
+        expect(shouldUseKuaiziAssets('CreateAssetGroup', { Name: 'g', GroupType: 'LivenessFace' })).toBe(false);
+        expect(shouldUseKuaiziAssets('ListAssetGroups', { GroupType: 'LivenessFace' })).toBe(false);
+        expect(shouldUseKuaiziAssets('ListAssets', { Filter: { GroupType: 'LivenessFace' } })).toBe(false);
+    });
+
+    it('平台形 id(asset-… / group-…)回落平台库,存量素材按 Id 仍可 CRUD', () => {
+        expect(shouldUseKuaiziAssets('GetAsset', { Id: 'asset-20260803095838-5n989' })).toBe(false);
+        expect(shouldUseKuaiziAssets('DeleteAssetGroup', { Id: 'group-20260719153506-b945c6' })).toBe(false);
+        // CreateAsset 指定平台形 GroupId → 跟着组走
+        expect(
+            shouldUseKuaiziAssets('CreateAsset', {
+                GroupId: 'group-20260719153506-b945c6',
+                URL: 'https://x/a.jpg',
+                AssetType: 'Image',
+            }),
+        ).toBe(false);
+    });
+
+    it('非素材 Action(真人认证等)一律不接管', () => {
+        expect(shouldUseKuaiziAssets('CreateVisualValidateSession', {})).toBe(false);
+        expect(shouldUseKuaiziAssets('GetVisualValidateResult', { BytedToken: 'x' })).toBe(false);
     });
 });
 
