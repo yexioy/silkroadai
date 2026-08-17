@@ -12,6 +12,7 @@ import {
     type AssetType,
 } from '@/lib/enterprise/assets';
 import { RealPersonError, createVisualValidateSession, getVisualValidateGroupId } from '@/lib/enterprise/real-person';
+import { KUAIZI_ASSET_ACTIONS, handleKuaiziAssetAction, kuaiziAssetsEnabled } from '@/lib/enterprise/kuaizi-assets';
 
 export const runtime = 'nodejs';
 
@@ -227,6 +228,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // 通用,LivenessFace 只是分组类型不再决定存储位置;727 provider 素材路由下线
     // (volc-assets.ts 保留未挂接,provider 账号复活后如需可重接)。volc 生成引用平台
     // 素材走 lenient 混合解析(见 enterprise/proxy)。
+    //
+    // 例外(2026-08-17,缺省关):置 ENTERPRISE_KUAIZI_ASSETS=1 后,volc 渠道客户的 10 个
+    // 素材 Action 改走筷子开放平台自有素材库(见 kuaizi-assets.ts 头部的归属/隔离取舍)。
+    if (kuaiziAssetsEnabled() && isVolc && KUAIZI_ASSET_ACTIONS.has(action)) {
+        try {
+            return ok(action, await handleKuaiziAssetAction(action, body));
+        } catch (e) {
+            if (e instanceof RealPersonError) return fail(action, e.status, e.code, e.message);
+            console.error('[asset-api] kuaizi asset error', action, e);
+            return fail(action, 500, 'InternalError', 'internal error');
+        }
+    }
+
     try {
         switch (action) {
             case 'CreateAsset': {
