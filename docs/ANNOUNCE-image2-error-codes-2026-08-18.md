@@ -18,15 +18,15 @@
 
 **2. 状态码与 code 对照表(新契约)**
 
-| HTTP | error.code | 含义 | 建议处理 |
-| --- | --- | --- | --- |
-| 400 | `moderation_blocked` | 内容安全审核拒绝 | 改写提示词/更换素材,原样重发无效 |
-| 400 | `invalid_image` / `invalid_value` / `invalid_request` | 参考图损坏 / 尺寸参数非法 / 请求错误 | 按 `param` 与 message 修正请求 |
-| 401 | `invalid_api_key` | key 无效或禁用 | 检查 key |
-| 429 | `insufficient_quota` | 余额不足 | 充值后重试 |
-| 429 | `rate_limit_exceeded` | 限流/并发排队 | 按响应头 `Retry-After` 秒数退避重发 |
-| 500 | (无 code,type `server_error`) | 平台/上游临时错误 | 直接重试 |
-| 503 | (无 code,type `server_error`) | 线路繁忙 | 30 秒后重试 |
+| HTTP | error.code                                            | 含义                                 | 建议处理                            |
+| ---- | ----------------------------------------------------- | ------------------------------------ | ----------------------------------- |
+| 400  | `moderation_blocked`                                  | 内容安全审核拒绝                     | 改写提示词/更换素材,原样重发无效    |
+| 400  | `invalid_image` / `invalid_value` / `invalid_request` | 参考图损坏 / 尺寸参数非法 / 请求错误 | 按 `param` 与 message 修正请求      |
+| 401  | `invalid_api_key`                                     | key 无效或禁用                       | 检查 key                            |
+| 429  | `insufficient_quota`                                  | 余额不足                             | 充值后重试                          |
+| 429  | `rate_limit_exceeded`                                 | 限流/并发排队                        | 按响应头 `Retry-After` 秒数退避重发 |
+| 500  | (无 code,type `server_error`)                         | 平台/上游临时错误                    | 直接重试                            |
+| 503  | (无 code,type `server_error`)                         | 线路繁忙                             | 30 秒后重试                         |
 
 **3. 与旧行为的差异(如你的代码按旧值分支,请对照迁移)**
 
