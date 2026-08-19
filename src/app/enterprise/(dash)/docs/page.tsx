@@ -624,8 +624,10 @@ print(j.get("video_url"), j.get("usage"))`}</Pre>
 # 响应体: {"status":"in_progress", "vendor_task_id":"cgt-20260817125256-tfv79", …}`}</Pre>
                 <ul className="list-disc space-y-1 pl-5">
                     <li>
-                        <b>只用于对齐排查,不要当句柄用</b> —— 查询、计费一律以我们返回的 <Code>id</Code>(
-                        <Code>cgt-</Code> 开头)为准,拿 <Code>vendor_task_id</Code> 查任务会查不到。
+                        <b>这个号只能看、不能拿来调接口。</b> 查询任务、对账计费一律用我们返回的 <Code>id</Code>(
+                        <Code>cgt-</Code> 开头);把 <Code>vendor_task_id</Code> 填进查询接口会返回{' '}
+                        <Code>404 task not found</Code>
+                        。它的唯一用途:当您需要和我们(或火山)核对某一条具体任务时,报这个号能更快定位到渠道侧日志。
                     </li>
                     <li>
                         形态<b>不固定</b>:任务落在字节方舟渠道时为 <Code>cgt-…</Code>(火山官方任务号,可与火山侧对账);

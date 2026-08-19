@@ -296,8 +296,10 @@ curl -X POST ${BASE}/v1/video/generations \\
                 </div>
                 <ul className="list-disc space-y-1 pl-5">
                     <li>
-                        <b>这些字段只用于对齐排查,不要当句柄用</b> —— 增删改查、生成引用一律用我们返回的 <Code>Id</Code>
-                        。把 <Code>VendorAssetId</Code> 回传给我们会查不到该素材。
+                        <b>这几个号只能看、不能拿来调接口。</b> 增删改查、以及生成里的 <Code>asset://</Code>{' '}
+                        引用,一律用我们返回的 <Code>Id</Code>;把 <Code>VendorAssetId</Code> / <Code>VendorGroupId</Code>{' '}
+                        回传给我们会返回 <Code>ResourceNotFound</Code>
+                        。它们的唯一用途:与我们(或火山)核对某一条具体素材时,报这个号能更快定位。
                     </li>
                     <li>
                         <b>
