@@ -243,6 +243,74 @@ curl -X POST ${BASE}/v1/video/generations \\
                 </p>
             </Section>
 
+            <Section id="vendor-fields" title="4.6 火山渠道:渠道侧原始 ID / URL(vendor 字段)">
+                <p>
+                    火山渠道的素材接口会<b>额外</b>返回渠道侧的原始标识,便于您与火山侧日志/工单对齐:
+                </p>
+                <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                        <thead>
+                            <tr>
+                                <Th>字段</Th>
+                                <Th>出现在</Th>
+                                <Th>说明</Th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <Td>
+                                    <Code>VendorGroupId</Code>
+                                </Td>
+                                <Td>
+                                    <Code>CreateAssetGroup</Code> / <Code>GetAssetGroup</Code> /{' '}
+                                    <Code>ListAssetGroups</Code>
+                                </Td>
+                                <Td>渠道侧真实素材组 ID(建组为同步调用,创建即返回)</Td>
+                            </tr>
+                            <tr>
+                                <Td>
+                                    <Code>VendorAssetId</Code>
+                                </Td>
+                                <Td>
+                                    <Code>GetAsset</Code> / <Code>ListAssets</Code>
+                                </Td>
+                                <Td>
+                                    渠道侧真实素材 ID。<b>素材到达终态后才有</b>(<Code>Status=Active</Code> /{' '}
+                                    <Code>Failed</Code>)
+                                </Td>
+                            </tr>
+                            <tr>
+                                <Td>
+                                    <Code>VendorAssetUrl</Code>
+                                </Td>
+                                <Td>
+                                    <Code>GetAsset</Code> / <Code>ListAssets</Code>
+                                </Td>
+                                <Td>
+                                    渠道侧素材直链。<b>约 12 小时时效的签名地址</b>,处理中(
+                                    <Code>Processing</Code>)不返回
+                                </Td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <ul className="list-disc space-y-1 pl-5">
+                    <li>
+                        <b>这些字段只用于对齐排查,不要当句柄用</b> —— 增删改查、生成引用一律用我们返回的 <Code>Id</Code>
+                        。把 <Code>VendorAssetId</Code> 回传给我们会查不到该素材。
+                    </li>
+                    <li>
+                        <b>
+                            <Code>VendorAssetUrl</Code> 请勿缓存
+                        </b>
+                        (约 12h 过期),需要时现调 <Code>GetAsset</Code> 取最新地址;长期保存请自行转存。
+                    </li>
+                    <li>
+                        视频生成侧的对应字段是 <Code>vendor_task_id</Code>,见接入文档「火山渠道」。
+                    </li>
+                </ul>
+            </Section>
+
             <Section id="volc-channel-assets" title="4.5 火山渠道的素材库(与其它渠道不同,请注意)">
                 <p>
                     若您使用的是<b>火山渠道</b>(<Code>doubao-seedance-*</Code> 系模型),上述 10 个 Action
