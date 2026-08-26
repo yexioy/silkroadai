@@ -180,6 +180,11 @@ export interface VolcArkMeta {
     executionExpiresAfter?: number | null;
     seed?: number | null;
     tools?: unknown;
+    /** 上游的任务创建/更新时间(unix 秒)。上游未受理时为 0 → 回落我们的库值。 */
+    createdAt?: number | null;
+    updatedAt?: number | null;
+    /** 上游给了就跟随(火山成功态恒有该键,无尾帧时为空串)。 */
+    lastFrameUrl?: string | null;
 }
 
 /** 火山官方默认值 —— 任务未完成时上游不返回这几项,但客户契约要求字段恒在。 */
@@ -224,6 +229,12 @@ export function buildArkTaskResponse(inp: ArkTaskResponseInput): Record<string, 
         base.generate_audio = m.generateAudio ?? inp.generateAudio ?? true;
         base.seed = m.seed ?? (inp.seed != null ? Number(inp.seed) : 0);
         base.tools = m.tools ?? [];
+        // 时间戳以**上游**为准。此前用的是我们库行的 created_at + Date.now():
+        //  - created_at 与上游差几秒(我们落库晚于上游受理)
+        //  - updated_at 是 Date.now() → **客户每查一次就变一次**,根本不是"任务更新时间"
+        // 上游未受理时返 0(running 早期),那时才回落库值。
+        if (m.createdAt) base.created_at = m.createdAt;
+        if (m.updatedAt) base.updated_at = m.updatedAt;
     }
     if (inp.resolution) base.resolution = inp.resolution;
     if (inp.duration != null) base.duration = inp.duration;
@@ -232,6 +243,11 @@ export function buildArkTaskResponse(inp: ArkTaskResponseInput): Record<string, 
         const content: Record<string, unknown> = {};
         if (inp.videoUrl) content.video_url = inp.videoUrl;
         if (inp.lastFrameUrl) content.last_frame_url = inp.lastFrameUrl;
+        // volc:火山成功态 content 恒有 last_frame_url 键(无尾帧时为空串)——
+        // 客户按基准比对时"键缺失"和"值为空"是两回事。
+        else if (inp.volcMeta && inp.volcMeta.lastFrameUrl != null) {
+            content.last_frame_url = inp.volcMeta.lastFrameUrl;
+        }
         base.content = content;
         if (inp.usage) {
             const completion = inp.usage.completion_tokens ?? inp.usage.total_tokens ?? 0;

@@ -915,6 +915,9 @@ async function handlePoll(req: NextRequest, taskId: string, format: ClientFormat
                               executionExpiresAfter: upstreamNum(j?.execution_expires_after),
                               seed: upstreamNum(j?.seed),
                               tools: Array.isArray(j?.tools) ? j.tools : null,
+                              createdAt: upstreamNum(j?.upstream_created_at),
+                              updatedAt: upstreamNum(j?.upstream_updated_at),
+                              lastFrameUrl: typeof j?.last_frame_url === 'string' ? j.last_frame_url : null,
                           }
                         : null,
             }),

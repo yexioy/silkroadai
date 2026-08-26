@@ -530,6 +530,12 @@ export async function pollVolcVideo(id: string): Promise<NextResponse> {
     if (typeof j.execution_expires_after === 'number') upstreamMeta.execution_expires_after = j.execution_expires_after;
     if (typeof j.seed === 'number') upstreamMeta.seed = j.seed;
     if (Array.isArray(j.tools)) upstreamMeta.tools = j.tools;
+    // 时间戳以上游为准(上游未受理时返 0,上层据此回落库值)。
+    if (typeof j.created_at === 'number') upstreamMeta.upstream_created_at = j.created_at;
+    if (typeof j.updated_at === 'number') upstreamMeta.upstream_updated_at = j.updated_at;
+    // 火山成功态 content 恒有 last_frame_url(无尾帧为空串)—— 空串也要带出去,
+    // 「键缺失」和「值为空」对客户的契约校验是两回事。
+    if (typeof contentObj?.last_frame_url === 'string') upstreamMeta.last_frame_url = contentObj.last_frame_url;
 
     return NextResponse.json(
         {
