@@ -418,6 +418,24 @@ describe('上游已推导的元数据优先(2026-08-26 客户报障:-1 一直回
         expect(j.resolution).toBe('480p');
     });
 
+    it('火山官方字段集从上游透出来(客户契约校验用)', async () => {
+        vi.spyOn(global, 'fetch').mockResolvedValue(
+            poll({
+                framespersecond: 24,
+                generate_audio: true,
+                execution_expires_after: 172800,
+                seed: 26206,
+                tools: [],
+            }),
+        );
+        const j = (await (await pollVolcVideo('cgt-abc')).json()) as Record<string, unknown>;
+        expect(j.framespersecond).toBe(24);
+        expect(j.generate_audio).toBe(true);
+        expect(j.execution_expires_after).toBe(172800);
+        expect(j.seed).toBe(26206);
+        expect(j.tools).toEqual([]);
+    });
+
     it('上游还没推导出来(running 期)→ 不带这些键,交给上层回落库值', async () => {
         vi.spyOn(global, 'fetch').mockResolvedValue(
             new Response(JSON.stringify({ id: 'kz-cgt-abc', status: 'running' }), { status: 200 }),

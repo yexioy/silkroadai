@@ -523,6 +523,13 @@ export async function pollVolcVideo(id: string): Promise<NextResponse> {
     if (typeof j.duration === 'number') upstreamMeta.duration = j.duration;
     if (typeof j.ratio === 'string' && j.ratio) upstreamMeta.ratio = j.ratio;
     if (typeof j.resolution === 'string' && j.resolution) upstreamMeta.resolution = j.resolution;
+    // 火山官方字段集里客户会做契约校验的几项(2026-08-27 客户报障:我们一个没给)。
+    // 上游完成态实测返回 framespersecond / generate_audio / execution_expires_after / seed / tools。
+    if (typeof j.framespersecond === 'number') upstreamMeta.framespersecond = j.framespersecond;
+    if (typeof j.generate_audio === 'boolean') upstreamMeta.generate_audio = j.generate_audio;
+    if (typeof j.execution_expires_after === 'number') upstreamMeta.execution_expires_after = j.execution_expires_after;
+    if (typeof j.seed === 'number') upstreamMeta.seed = j.seed;
+    if (Array.isArray(j.tools)) upstreamMeta.tools = j.tools;
 
     return NextResponse.json(
         {
