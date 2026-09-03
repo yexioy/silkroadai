@@ -194,7 +194,7 @@ describe('buildReqlogWhere', () => {
         expect(w.kind).toBe('submit');
         expect(w.model).toEqual({ contains: 'seedance' });
         expect(w.http_status).toEqual({ gte: 400, lt: 500 });
-        expect(w.OR).toHaveLength(3);
+        expect(w.OR).toHaveLength(4);
         expect(w.created_at).toBeDefined();
     });
     it('非法值(伪 uuid / 未知 region / 未知 result)全部忽略', () => {
@@ -215,5 +215,41 @@ describe('reqlogRetentionDays', () => {
         expect(reqlogRetentionDays()).toBe(60);
         process.env.ENTERPRISE_REQLOG_RETENTION_DAYS = 'abc';
         expect(reqlogRetentionDays()).toBe(60);
+    });
+});
+
+describe('asset_action(P2 2026-09-04)', () => {
+    it('kind=asset_action 进筛选白名单;q 也命中 resource_id', () => {
+        expect(buildReqlogWhere({ kind: 'asset_action' }).kind).toBe('asset_action');
+        const w = buildReqlogWhere({ q: 'asset-2026' });
+        expect(w.OR).toContainEqual({ resource_id: { contains: 'asset-2026' } });
+        expect(w.OR).toHaveLength(4);
+    });
+
+    it('action / resource_id 落列', async () => {
+        const ctx = newRequestLogCtx('asset_action', 'platform');
+        ctx.action = 'CreateAsset';
+        ctx.resourceId = 'asset-20260904000000-abc123';
+        writeRequestLog(ctx);
+        await flush();
+        const data = db.enterpriseRequestLog.create.mock.calls[0][0].data;
+        expect(data).toMatchObject({
+            kind: 'asset_action',
+            format: 'platform',
+            action: 'CreateAsset',
+            resource_id: 'asset-20260904000000-abc123',
+        });
+    });
+
+    it('火山 envelope 错误形({ResponseMetadata:{Error:{Code,Message}}})也能提取 error 列', async () => {
+        const res = NextResponse.json(
+            { ResponseMetadata: { RequestId: 'x', Error: { Code: 'AssetNotFound', Message: '素材不存在: a1' } } },
+            { status: 404 },
+        );
+        writeRequestLog(newRequestLogCtx('asset_action'), res);
+        await flush();
+        const data = db.enterpriseRequestLog.create.mock.calls[0][0].data;
+        expect(data.error_code).toBe('AssetNotFound');
+        expect(data.error_message).toBe('素材不存在: a1');
     });
 });

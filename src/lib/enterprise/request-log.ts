@@ -10,7 +10,9 @@
  *  - submit:全量记录,含没过鉴权/余额门就被拒的(对账要数得到被拒的);
  *  - poll:只记有信息量的 —— 出错(含没打到上游的 401/403/404/400)/ 状态迁移 / 终态;
  *    上游错误只记「真打了上游」那次(缓存重放不刷屏);ENTERPRISE_REQLOG_POLL_ALL=1 临时全量;
- *  - reconcile:对账器补的终态动作(补扣 / 标失败 / 过期)。
+ *  - reconcile:对账器补的终态动作(补扣 / 标失败 / 过期);
+ *  - asset_action(P2 2026-09-04):素材库 /api Action 全量(CRUD + 真人认证;量级远低于
+ *    轮询,全记;format 列复用为素材落库位置 platform | kuaizi)。
  *
  * 红线:写日志绝不影响客户请求 —— fire-and-forget,任何失败(含同步异常)只 console.warn。
  * upstream_body 含上游中间商域名,该表 admin-only(#271)。
@@ -30,8 +32,8 @@ const MAX_INLINE_STRING = 2048; // 入参里超过这个长度的字符串按媒
 const MAX_ERROR_MESSAGE = 500;
 
 export interface RequestLogCtx {
-    kind: 'submit' | 'poll' | 'reconcile';
-    format?: 'v1' | 'ark';
+    kind: 'submit' | 'poll' | 'reconcile' | 'asset_action';
+    format?: 'v1' | 'ark' | 'platform' | 'kuaizi';
     startedAt: number;
     userId?: string | null;
     keyId?: string | null;
@@ -40,6 +42,10 @@ export interface RequestLogCtx {
     taskId?: string | null;
     vendorTaskId?: string | null;
     clientRequestId?: string | null;
+    /** 素材库 Action 名(asset_action 行专用)。 */
+    action?: string | null;
+    /** 素材/素材组 id(asset_action 行专用;检索 q 也命中它)。 */
+    resourceId?: string | null;
     requestBody?: string | null; // 已脱媒 + 截断
     upstreamStatus?: number | null;
     upstreamBody?: string | null;
@@ -56,7 +62,7 @@ export interface RequestLogCtx {
 
 export function newRequestLogCtx(
     kind: RequestLogCtx['kind'],
-    format?: 'v1' | 'ark',
+    format?: RequestLogCtx['format'],
     req?: { headers: Headers },
 ): RequestLogCtx {
     const ctx: RequestLogCtx = { kind, format, startedAt: Date.now() };
@@ -142,7 +148,7 @@ export interface ReqlogFilters {
 }
 
 const REGIONS = new Set(['cn', 'global', 'promax', 'volc']);
-const KINDS = new Set(['submit', 'poll', 'reconcile']);
+const KINDS = new Set(['submit', 'poll', 'reconcile', 'asset_action']);
 
 /** 筛选参数 → prisma where(后台列表页与 CSV 导出共用,保证两边结果一致)。 */
 export function buildReqlogWhere(f: ReqlogFilters): Record<string, unknown> {
@@ -175,6 +181,7 @@ export function buildReqlogWhere(f: ReqlogFilters): Record<string, unknown> {
                 { task_id: { contains: q } },
                 { client_request_id: { contains: q } },
                 { vendor_task_id: { contains: q } },
+                { resource_id: { contains: q } },
             ];
         }
     }
@@ -196,11 +203,20 @@ export function writeRequestLog(ctx: RequestLogCtx, res?: { status: number; clon
                 const j = (await res
                     .clone()
                     .json()
-                    .catch(() => null)) as { error?: { code?: unknown; message?: unknown } } | null;
-                if (j?.error) {
-                    errorCode = typeof j.error.code === 'string' ? j.error.code.slice(0, 64) : null;
-                    errorMessage =
-                        typeof j.error.message === 'string' ? j.error.message.slice(0, MAX_ERROR_MESSAGE) : null;
+                    .catch(() => null)) as {
+                    error?: { code?: unknown; message?: unknown };
+                    // 素材库 Action 面的火山 envelope(fail() 形):{ResponseMetadata:{Error:{Code,Message}}}
+                    ResponseMetadata?: { Error?: { Code?: unknown; Message?: unknown } };
+                } | null;
+                const err =
+                    j?.error ??
+                    (j?.ResponseMetadata?.Error && {
+                        code: j.ResponseMetadata.Error.Code,
+                        message: j.ResponseMetadata.Error.Message,
+                    });
+                if (err) {
+                    errorCode = typeof err.code === 'string' ? err.code.slice(0, 64) : null;
+                    errorMessage = typeof err.message === 'string' ? err.message.slice(0, MAX_ERROR_MESSAGE) : null;
                 }
             }
             await prisma.enterpriseRequestLog.create({
@@ -214,6 +230,8 @@ export function writeRequestLog(ctx: RequestLogCtx, res?: { status: number; clon
                     task_id: ctx.taskId?.slice(0, 128) ?? null,
                     vendor_task_id: ctx.vendorTaskId?.slice(0, 128) ?? null,
                     client_request_id: ctx.clientRequestId?.slice(0, 128) ?? null,
+                    action: ctx.action?.slice(0, 64) ?? null,
+                    resource_id: ctx.resourceId?.slice(0, 128) ?? null,
                     http_status: httpStatus,
                     upstream_status: ctx.upstreamStatus ?? null,
                     cache_hit: ctx.cacheHit ?? false,

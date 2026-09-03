@@ -21,6 +21,7 @@ const { db, resolveEnterpriseAuth, fetchAssetFromUrl, storeAsset, deleteAssetFn 
             delete: vi.fn(),
         },
         enterpriseUpstreamKey: { findUnique: vi.fn() },
+        enterpriseRequestLog: { create: vi.fn(async () => ({})) },
         $transaction: vi.fn(),
     },
     resolveEnterpriseAuth: vi.fn(),
@@ -453,5 +454,74 @@ describe('AssetType 大写对齐火山官方', () => {
         const res = await POST(req('GetAsset', { Id: 'asset-1' }));
         const j = (await res.json()) as { Result: { AssetType: string } };
         expect(j.Result.AssetType).toBe('Video');
+    });
+});
+
+describe('请求日志落库(P2 2026-09-04)', () => {
+    const flush = () => new Promise((r) => setTimeout(r, 0));
+    const reqlogRows = () =>
+        (db.enterpriseRequestLog.create.mock.calls as unknown as Array<[{ data: Record<string, unknown> }]>).map(
+            (c) => c[0].data,
+        );
+
+    it('CreateAsset 成功 → 全量落行(action / 归属 / 新建素材 id / 入参 / format=platform)', async () => {
+        fetchAssetFromUrl.mockResolvedValue({ bytes: Buffer.from('x'), mime: 'image/png' });
+        storeAsset.mockResolvedValue({ id: 'asset-20260904000000-abc123', public_url: 'https://r2/a.png' });
+        await POST(req('CreateAsset', { AssetType: 'image', URL: 'https://x/a.png', Name: '主角' }));
+        await flush();
+        const rows = reqlogRows();
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+            kind: 'asset_action',
+            action: 'CreateAsset',
+            format: 'platform',
+            user_id: 'u1',
+            key_id: 'k1',
+            resource_id: 'asset-20260904000000-abc123',
+            http_status: 200,
+        });
+        expect(String(rows[0].request_body)).toContain('https://x/a.png');
+        expect(typeof rows[0].duration_ms).toBe('number');
+    });
+
+    it('GetAsset 404 → 落行带 error_code(火山 envelope 的 Error.Code)+ 请求里的 Id', async () => {
+        db.enterpriseAsset.findFirst.mockResolvedValue(null);
+        await POST(req('GetAsset', { Id: 'asset-nope' }));
+        await flush();
+        const rows = reqlogRows();
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+            kind: 'asset_action',
+            action: 'GetAsset',
+            resource_id: 'asset-nope',
+            http_status: 404,
+            error_code: 'AssetNotFound',
+        });
+        expect(String(rows[0].error_message)).toContain('asset-nope');
+    });
+
+    it('鉴权失败(401)也落行:user 空 + UnauthorizedOperation', async () => {
+        resolveEnterpriseAuth.mockResolvedValue({ ok: false, status: 401, message: 'invalid key' });
+        await POST(req('ListAssets', {}));
+        await flush();
+        const rows = reqlogRows();
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+            kind: 'asset_action',
+            action: 'ListAssets',
+            user_id: null,
+            http_status: 401,
+            error_code: 'UnauthorizedOperation',
+        });
+    });
+
+    it('日志写失败不影响客户响应(fire-and-forget)', async () => {
+        db.enterpriseRequestLog.create.mockRejectedValue(new Error('db down'));
+        db.enterpriseAssetGroup.create.mockImplementation(({ data }: { data: { id: string } }) =>
+            Promise.resolve({ id: data.id }),
+        );
+        const res = await POST(req('CreateAssetGroup', { Name: 'g' }));
+        expect(res.status).toBe(200);
+        await flush();
     });
 });

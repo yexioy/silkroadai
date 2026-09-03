@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 
 const { db, resolveEnterpriseAuth, createSession, getGroupId } = vi.hoisted(() => ({
-    db: { enterpriseUpstreamKey: { findUnique: vi.fn() } },
+    db: { enterpriseUpstreamKey: { findUnique: vi.fn() }, enterpriseRequestLog: { create: vi.fn(async () => ({})) } },
     resolveEnterpriseAuth: vi.fn(),
     createSession: vi.fn(),
     getGroupId: vi.fn(),

@@ -14,7 +14,7 @@ export const metadata = { title: 'Seedance 企业端口 · 请求日志' };
 
 const PAGE_SIZE = 50;
 
-const KIND_LABEL: Record<string, string> = { submit: '提交', poll: '轮询', reconcile: '对账' };
+const KIND_LABEL: Record<string, string> = { submit: '提交', poll: '轮询', reconcile: '对账', asset_action: '素材' };
 
 function resultBadge(l: { http_status: number | null; upstream_status: number | null; outcome: string | null }) {
     if (l.outcome === 'completed' || l.outcome === 'back_charged')
@@ -84,6 +84,8 @@ export default async function EnterpriseAdminLogsPage({
                 region: true,
                 model: true,
                 task_id: true,
+                action: true,
+                resource_id: true,
                 http_status: true,
                 upstream_status: true,
                 cache_hit: true,
@@ -169,6 +171,7 @@ export default async function EnterpriseAdminLogsPage({
                     <option value="submit">提交</option>
                     <option value="poll">轮询</option>
                     <option value="reconcile">对账</option>
+                    <option value="asset_action">素材库</option>
                 </select>
                 <select
                     name="result"
@@ -192,7 +195,7 @@ export default async function EnterpriseAdminLogsPage({
                     type="text"
                     name="q"
                     defaultValue={sp.q}
-                    placeholder="任务 ID / 客户请求号"
+                    placeholder="任务/素材 ID / 客户请求号"
                     className="w-52 rounded-md border border-gray-300 px-2 py-1.5 text-sm"
                 />
                 <button
@@ -225,7 +228,7 @@ export default async function EnterpriseAdminLogsPage({
                                 <th className="py-1 pr-4">客户</th>
                                 <th className="py-1 pr-4">渠道</th>
                                 <th className="py-1 pr-4">模型</th>
-                                <th className="py-1 pr-4">任务 ID</th>
+                                <th className="py-1 pr-4">任务/素材 ID</th>
                                 <th className="py-1 pr-4">HTTP</th>
                                 <th className="py-1 pr-4">耗时</th>
                                 <th className="py-1 pr-4">结果</th>
@@ -240,6 +243,7 @@ export default async function EnterpriseAdminLogsPage({
                                     </td>
                                     <td className="py-2 pr-4">
                                         {KIND_LABEL[l.kind] ?? l.kind}
+                                        {l.action && <span className="ml-1 text-xs text-gray-600">{l.action}</span>}
                                         {l.format && <span className="ml-1 text-xs text-gray-400">{l.format}</span>}
                                     </td>
                                     <td className="py-2 pr-4 text-xs">
@@ -252,8 +256,8 @@ export default async function EnterpriseAdminLogsPage({
                                     <td className="py-2 pr-4">{l.region ?? '—'}</td>
                                     <td className="py-2 pr-4">{l.model ?? '—'}</td>
                                     <td className="py-2 pr-4 font-mono text-xs text-gray-500">
-                                        {l.task_id
-                                            ? `${l.task_id.slice(0, 20)}${l.task_id.length > 20 ? '…' : ''}`
+                                        {(l.task_id ?? l.resource_id)
+                                            ? `${(l.task_id ?? l.resource_id)!.slice(0, 20)}${(l.task_id ?? l.resource_id)!.length > 20 ? '…' : ''}`
                                             : '—'}
                                     </td>
                                     <td className="py-2 pr-4">
@@ -311,7 +315,8 @@ export default async function EnterpriseAdminLogsPage({
                 </div>
             )}
             <p className="mt-3 text-xs text-gray-400">
-                提交请求全量落库;轮询只记有信息量的(终态 / 上游报错 / 被拒),例行轮询不记。日志保留 60 天。
+                提交请求与素材库 Action 全量落库;轮询只记有信息量的(终态 / 上游报错 / 被拒),例行轮询不记。日志保留 60
+                天。
             </p>
         </section>
     );

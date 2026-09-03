@@ -21,12 +21,15 @@ const startImageCleanupScheduler = vi.fn();
 const startResellerCommissionScheduler = vi.fn();
 const startShadowMeterScheduler = vi.fn();
 const startBatchScheduler = vi.fn();
+const startEnterpriseReqlogCleanupScheduler = vi.fn();
 vi.mock('@/lib/order/timeout', () => ({ startTimeoutScheduler }));
 vi.mock('@/lib/scheduler/balance-alert', () => ({ startBalanceAlertScheduler }));
 vi.mock('@/lib/scheduler/image-cleanup', () => ({ startImageCleanupScheduler }));
 vi.mock('@/lib/scheduler/reseller-commission', () => ({ startResellerCommissionScheduler }));
 vi.mock('@/lib/scheduler/shadow-meter', () => ({ startShadowMeterScheduler }));
 vi.mock('@/lib/batch/worker', () => ({ startBatchScheduler }));
+// 不 mock 会 import 真调度器 → 初始 sweep 打真 prisma(P1 2026-09-03 的测试盲区,曾致本文件抖动超时)
+vi.mock('@/lib/scheduler/enterprise-reqlog-cleanup', () => ({ startEnterpriseReqlogCleanupScheduler }));
 
 const ALL_SCHEDULERS = [
     startTimeoutScheduler,
@@ -35,6 +38,7 @@ const ALL_SCHEDULERS = [
     startResellerCommissionScheduler,
     startShadowMeterScheduler,
     startBatchScheduler,
+    startEnterpriseReqlogCleanupScheduler,
 ];
 
 describe('instrumentation register()', () => {
@@ -59,7 +63,7 @@ describe('instrumentation register()', () => {
         expect(setGlobalDispatcher).toHaveBeenCalledTimes(1);
     });
 
-    it('nodejs runtime(主站,无门)→ 6 个调度器全部启动', async () => {
+    it('nodejs runtime(主站,无门)→ 7 个调度器全部启动', async () => {
         process.env.NEXT_RUNTIME = 'nodejs';
         const { register } = await import('../instrumentation');
         await register();
