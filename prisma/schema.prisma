@@ -1436,8 +1436,8 @@ model EnterpriseGlobalDiscount {
 model EnterpriseRequestLog {
   id                String   @id @default(uuid()) @db.Uuid
   created_at        DateTime @default(now())
-  kind              String // submit | poll | reconcile
-  format            String? // v1 | ark(对客面)
+  kind              String // submit | poll | reconcile | asset_action(素材库 Action,P2 2026-09-04)
+  format            String? // v1 | ark(对客面);asset_action 行 = platform | kuaizi(素材落哪个库)
   user_id           String?  @db.Uuid // 鉴权失败的请求可空(也要记 —— 对账要数得到被拒的)
   key_id            String?  @db.Uuid // 哪把 sk-ent / AK-SK 行
   region            String? // cn | global | promax | volc(显式落库,不再从 model 反推)
@@ -1445,6 +1445,8 @@ model EnterpriseRequestLog {
   task_id           String?
   vendor_task_id    String? // 上游渠道侧原始任务 id(轮询响应带时落库)
   client_request_id String? // 客户自带请求号(到达对账,#432)
+  action            String? // 素材库 Action 名(CreateAsset / ListAssets / …;asset_action 行专用)
+  resource_id       String? // 素材/素材组 id(asset-… / group-… / 筷子十进制号;asset_action 行专用)
   http_status       Int? // 我们返给客户的(reconcile 行为 null)
   upstream_status   Int? // 上游 HTTP status(没打上游 → null)
   cache_hit         Boolean  @default(false) // poll 短 TTL 缓存命中(#394)

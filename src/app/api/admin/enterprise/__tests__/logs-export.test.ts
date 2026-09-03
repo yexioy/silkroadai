@@ -71,7 +71,7 @@ describe('GET /api/admin/enterprise/logs/export', () => {
         const where = db.enterpriseRequestLog.findMany.mock.calls[0][0].where;
         expect(where.region).toBe('volc');
         expect(where.kind).toBe('submit');
-        expect(where.OR).toHaveLength(3);
+        expect(where.OR).toHaveLength(4);
     });
 
     it('超 5 万行 → 400 提示缩小范围', async () => {

@@ -91,6 +91,8 @@ export default async function EnterpriseAdminLogDetailPage({ params }: { params:
                     <Field label="任务 ID" value={log.task_id} mono />
                     <Field label="渠道侧任务 ID" value={log.vendor_task_id} mono />
                     <Field label="客户请求号" value={log.client_request_id} mono />
+                    <Field label="素材 Action" value={log.action} />
+                    <Field label="素材/组 ID" value={log.resource_id} mono />
                     <Field label="返给客户 HTTP" value={log.http_status} />
                     <Field
                         label="上游 HTTP"
