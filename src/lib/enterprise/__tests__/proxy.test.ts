@@ -526,6 +526,56 @@ describe('提交', () => {
         expect(db.seedanceVideoTask.create).not.toHaveBeenCalled();
     });
 
+    it('到达日志:每个提交(含后续 401 的)都记 submit received + client_request_id', async () => {
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+        resolveEnterpriseAuth.mockResolvedValue({
+            ok: false,
+            status: 401,
+            code: 'invalid_api_key',
+            message: 'invalid or inactive API key',
+        });
+        const res = await handleEnterpriseV1(
+            req('POST', '/v1/video/generations', { ...goodBody, client_request_id: 'cli-req-42' }),
+            '/video/generations',
+        );
+        expect(res.status).toBe(401);
+        expect(logSpy).toHaveBeenCalledWith(
+            '[enterprise-proxy] submit received',
+            expect.objectContaining({ client_request_id: 'cli-req-42', model: 'seedance2.0-pro-720p' }),
+        );
+        logSpy.mockRestore();
+    });
+
+    it('非 JSON body → 400 invalid_json + 留痕(以前无日志,对账盲区)', async () => {
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const r = new NextRequest('http://128.241.232.23/v1/video/generations', {
+            method: 'POST',
+            headers: { authorization: 'Bearer sk-ent-' + 'a'.repeat(48), 'content-type': 'application/json' },
+            body: '{broken',
+        });
+        const res = await handleEnterpriseV1(r, '/video/generations');
+        expect(res.status).toBe(400);
+        expect(warnSpy).toHaveBeenCalledWith(
+            '[enterprise-proxy] submit body not JSON',
+            expect.objectContaining({ bytes: 7 }),
+        );
+        warnSpy.mockRestore();
+    });
+
+    it('body 读失败(传输中断)→ 400 + 留痕,不打上游', async () => {
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const r = req('POST', '/v1/video/generations', goodBody);
+        vi.spyOn(r, 'text').mockRejectedValue(new Error('aborted'));
+        const res = await handleEnterpriseV1(r, '/video/generations');
+        expect(res.status).toBe(400);
+        expect(warnSpy).toHaveBeenCalledWith(
+            '[enterprise-proxy] submit body read failed(传输中断)',
+            expect.objectContaining({ error: 'aborted' }),
+        );
+        expect(submitVideoWithKey).not.toHaveBeenCalled();
+        warnSpy.mockRestore();
+    });
+
     it('任务落库失败 → 503 fail closed(防生成了收不到钱)', async () => {
         submitVideoWithKey.mockResolvedValue(NextResponse.json({ id: 'cgt-e2', status: 'queued' }));
         db.seedanceVideoTask.create.mockRejectedValue(new Error('db down'));

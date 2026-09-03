@@ -539,13 +539,33 @@ async function translateVolcAssetRefs(body: Record<string, unknown>): Promise<Re
 
 async function handleSubmit(req: NextRequest, format: ClientFormat = 'v1'): Promise<NextResponse> {
     // 先读原始 body(AK/SK 验签对原始字节算 hash),再解析 + 归一。
-    const rawBody = await req.text();
+    // 到达对账三连(2026-09-03 weirdo 5 并发只见 4 个,无日志只能间接推断):
+    // ① body 读失败(客户端上行中断/超时)② 非 JSON ③ 正常到达 —— 三条路都留痕,
+    // 「客户说发了 N 个我们收到 M 个」以后直接数 submit received + client_request_id 对账。
+    let rawBody: string;
+    try {
+        rawBody = await req.text();
+    } catch (e) {
+        console.warn('[enterprise-proxy] submit body read failed(传输中断)', {
+            format,
+            content_length: req.headers.get('content-length'),
+            error: e instanceof Error ? e.message : String(e),
+        });
+        return errJson(400, 'invalid_request', 'request body incomplete');
+    }
     let body: Record<string, unknown>;
     try {
         body = rawBody.trim() ? (JSON.parse(rawBody) as Record<string, unknown>) : {};
     } catch {
+        console.warn('[enterprise-proxy] submit body not JSON', { format, bytes: rawBody.length });
         return errJson(400, 'invalid_json', 'request body must be JSON');
     }
+    console.log('[enterprise-proxy] submit received', {
+        format,
+        model: typeof body.model === 'string' ? body.model : null,
+        client_request_id: typeof body.client_request_id === 'string' ? body.client_request_id : undefined,
+        bytes: rawBody.length,
+    });
 
     // 调用方是不是 volc 客户?(鉴权前的探测,只用来决定「模型名与未知字段按哪个渠道处理」)
     // ⚠️ 同一个火山原生 id 对 cn 客户与 volc 客户是两个意思 —— 2026-08-26 客户实测:
