@@ -3,6 +3,7 @@
  * API 层各端点仍各自 resolveAdmin('superadmin') 细门 —— 这里只是页面粗门。
  */
 import type { ReactNode } from 'react';
+import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { headers } from 'next/headers';
 import { NextRequest } from 'next/server';
@@ -25,8 +26,16 @@ export default async function EnterpriseAdminLayout({ children }: { children: Re
         <div className="min-h-screen bg-gray-50">
             <header className="border-b border-gray-200 bg-gray-900">
                 <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
-                    <div>
+                    <div className="flex items-center gap-4">
                         <span className="text-base font-semibold text-white">Seedance 企业端口 · 运营后台</span>
+                        <nav className="flex items-center gap-3 text-sm text-gray-300">
+                            <Link href="/enterprise-admin" className="hover:text-white">
+                                客户
+                            </Link>
+                            <Link href="/enterprise-admin/logs" className="hover:text-white">
+                                请求日志
+                            </Link>
+                        </nav>
                     </div>
                     <div className="flex items-center gap-3 text-sm text-gray-300">
                         <span>{user.email}</span>

@@ -18,6 +18,7 @@ const {
     db: {
         seedanceVideoTask: { create: vi.fn(), findUnique: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
         account: { findUnique: vi.fn() },
+        enterpriseRequestLog: { create: vi.fn(async () => ({})) },
     },
     resolveEnterpriseAuth: vi.fn(),
     getUpstreamKeyForUser: vi.fn(),
@@ -1633,5 +1634,151 @@ describe('vendor_task_id 出口(2026-08-19)', () => {
         const body = (await res.json()) as Record<string, unknown>;
         expect(body).not.toHaveProperty('vendor_task_id');
         expect(body.status).toBe('running');
+    });
+});
+
+describe('请求日志落库(2026-09-03)', () => {
+    const flush = () => new Promise((r) => setTimeout(r, 0));
+    const reqlogRows = () =>
+        (db.enterpriseRequestLog.create.mock.calls as unknown as Array<[{ data: Record<string, unknown> }]>).map(
+            (c) => c[0].data,
+        );
+
+    it('submit happy → 全量落行(归属/渠道/任务/上游/入参)', async () => {
+        submitVideoWithKey.mockResolvedValue(NextResponse.json({ id: 'cgt-e1', task_id: 'cgt-e1', status: 'queued' }));
+        await handleEnterpriseV1(
+            req('POST', '/v1/video/generations', {
+                model: 'seedance-2-0',
+                prompt: '一只猫',
+                client_request_id: 'cli-7',
+            }),
+            '/video/generations',
+        );
+        await flush();
+        const rows = reqlogRows();
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+            kind: 'submit',
+            format: 'v1',
+            user_id: 'u1',
+            key_id: 'k1',
+            region: 'cn',
+            model: 'seedance-2-0',
+            task_id: 'cgt-e1',
+            client_request_id: 'cli-7',
+            http_status: 200,
+            upstream_status: 200,
+        });
+        expect(String(rows[0].request_body)).toContain('一只猫');
+        expect(typeof rows[0].duration_ms).toBe('number');
+        expect(typeof rows[0].upstream_ms).toBe('number');
+    });
+
+    it('submit 被拒(401,没打上游)也落行:user 空 + error_code 是客户看到的', async () => {
+        resolveEnterpriseAuth.mockResolvedValue({
+            ok: false,
+            status: 401,
+            code: 'invalid_api_key',
+            message: 'invalid or inactive API key',
+        });
+        await handleEnterpriseV1(req('POST', '/v1/video/generations', { model: 'seedance-2-0' }), '/video/generations');
+        await flush();
+        const rows = reqlogRows();
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+            kind: 'submit',
+            user_id: null,
+            http_status: 401,
+            upstream_status: null,
+            error_code: 'invalid_api_key',
+        });
+    });
+
+    it('submit 入参里的 base64 data URL 脱媒后落库(不存媒体字节)', async () => {
+        submitVideoWithKey.mockResolvedValue(NextResponse.json({ id: 'cgt-e2', status: 'queued' }));
+        resolveAssetRefs.mockImplementation(async (b: Record<string, unknown>) => b);
+        await handleEnterpriseV1(
+            req('POST', '/v1/video/generations', {
+                model: 'seedance-2-0',
+                prompt: 'x',
+                image: `data:image/png;base64,${'Z'.repeat(50_000)}`,
+            }),
+            '/video/generations',
+        );
+        await flush();
+        const body = String(reqlogRows()[0].request_body);
+        expect(body).not.toContain('ZZZZ');
+        expect(body).toContain('[data-url image/png');
+    });
+
+    it('poll 例行(in_progress,状态没变)→ 不落行', async () => {
+        db.seedanceVideoTask.findUnique.mockResolvedValue({
+            id: 'cgt-e1',
+            user_id: 'u1',
+            tier: 'enterprise-portal',
+            model: 'seedance-2-0',
+            tokens: null,
+            status: 'queued',
+        });
+        pollVideoWithKey.mockResolvedValue(NextResponse.json({ id: 'cgt-e1', status: 'in_progress' }));
+        const res = await handleEnterpriseV1(req('GET', '/v1/video/generations/cgt-e1'), '/video/generations/cgt-e1');
+        expect(res.status).toBe(200);
+        await flush();
+        expect(db.enterpriseRequestLog.create).not.toHaveBeenCalled();
+    });
+
+    it('poll 首次完成(queued→completed)→ 落行,outcome=completed + 上游 usage 原文', async () => {
+        db.seedanceVideoTask.findUnique.mockResolvedValue({
+            id: 'cgt-e1',
+            user_id: 'u1',
+            tier: 'enterprise-portal',
+            model: 'seedance-2-0',
+            tokens: null,
+            status: 'queued',
+        });
+        pollVideoWithKey.mockResolvedValue(
+            NextResponse.json({ id: 'cgt-e1', status: 'completed', usage: { completion_tokens: 108872 } }),
+        );
+        chargeEnterpriseVideoTask.mockResolvedValue({ outcome: 'charged', costCny: 4.26 });
+        await handleEnterpriseV1(req('GET', '/v1/video/generations/cgt-e1'), '/video/generations/cgt-e1');
+        await flush();
+        const rows = reqlogRows();
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+            kind: 'poll',
+            user_id: 'u1',
+            task_id: 'cgt-e1',
+            region: 'cn',
+            outcome: 'completed',
+            http_status: 200,
+            upstream_status: 200,
+        });
+        expect(String(rows[0].upstream_body)).toContain('108872');
+    });
+
+    it('poll 任务不存在(404,没打上游)→ 落行', async () => {
+        db.seedanceVideoTask.findUnique.mockResolvedValue(null);
+        await handleEnterpriseV1(req('GET', '/v1/video/generations/cgt-nope'), '/video/generations/cgt-nope');
+        await flush();
+        const rows = reqlogRows();
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+            kind: 'poll',
+            task_id: 'cgt-nope',
+            http_status: 404,
+            error_code: 'not_found',
+            upstream_status: null,
+        });
+    });
+
+    it('日志写失败不影响客户响应(fire-and-forget)', async () => {
+        db.enterpriseRequestLog.create.mockRejectedValue(new Error('db down'));
+        submitVideoWithKey.mockResolvedValue(NextResponse.json({ id: 'cgt-e3', status: 'queued' }));
+        const res = await handleEnterpriseV1(
+            req('POST', '/v1/video/generations', { model: 'seedance-2-0', prompt: 'x' }),
+            '/video/generations',
+        );
+        expect(res.status).toBe(200);
+        await flush();
     });
 });

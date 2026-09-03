@@ -1426,6 +1426,44 @@ model EnterpriseGlobalDiscount {
   @@map("enterprise_global_discounts")
 }
 
+// ── 企业门户请求日志(2026-09-03)──
+// 一条对客请求一行(submit 全量;poll 只记有信息量的:出错/状态迁移/终态,含没打到上游
+// 就被拒的 401/403/404/400;reconcile = 对账器补的终态动作)。admin-only:upstream_body
+// 含上游中间商域名(xinhankr/artsmcp),绝不接客户面(#271 红线)。
+// request_body 落库前脱媒(base64/data URL → 占位符)+ 截断,防一张图撑爆行。
+// 保留期 ENTERPRISE_REQLOG_RETENTION_DAYS(默认 60 天),主站实例定时清理(企业实例
+// instrumentation 门不跑 cron,两实例同库)。
+model EnterpriseRequestLog {
+  id                String   @id @default(uuid()) @db.Uuid
+  created_at        DateTime @default(now())
+  kind              String // submit | poll | reconcile
+  format            String? // v1 | ark(对客面)
+  user_id           String?  @db.Uuid // 鉴权失败的请求可空(也要记 —— 对账要数得到被拒的)
+  key_id            String?  @db.Uuid // 哪把 sk-ent / AK-SK 行
+  region            String? // cn | global | promax | volc(显式落库,不再从 model 反推)
+  model             String? // 客户实际调用的对客模型名
+  task_id           String?
+  vendor_task_id    String? // 上游渠道侧原始任务 id(轮询响应带时落库)
+  client_request_id String? // 客户自带请求号(到达对账,#432)
+  http_status       Int? // 我们返给客户的(reconcile 行为 null)
+  upstream_status   Int? // 上游 HTTP status(没打上游 → null)
+  cache_hit         Boolean  @default(false) // poll 短 TTL 缓存命中(#394)
+  outcome           String? // 本行的结果:poll 终态迁移(completed/failed)/ reconcile 动作(back_charged/terminalized/expired)
+  error_code        String? // 我们返给客户的错误码(insufficient_balance / model_not_found …)
+  error_message     String?
+  duration_ms       Int? // handler 总耗时
+  upstream_ms       Int? // 上游 fetch 耗时
+  request_body      String? // 脱媒 + 截断后的入参 JSON(≤32KB)
+  upstream_body     String? // 上游响应截断(≤32KB;admin-only,见头注)
+  client_ip         String?
+  user_agent        String?
+
+  @@index([created_at])
+  @@index([user_id, created_at])
+  @@index([task_id])
+  @@map("enterprise_request_logs")
+}
+
 // ── OpenAI Batch API 兼容(/v1/files + /v1/batches,2026-08-29)──
 // 客户上传 JSONL(每行一个 /v1/images/* 请求)→ 建 batch → worker 逐行重放现有
 // 同步生图管线(计费/failover/错误归一全复用)→ 结果组装成 output JSONL 供下载。
