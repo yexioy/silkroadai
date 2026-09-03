@@ -29,6 +29,7 @@ const {
             findMany: vi.fn(),
         },
         account: { findUnique: vi.fn() },
+        enterpriseRequestLog: { create: vi.fn(async () => ({})) },
     },
     resolveEnterpriseAuth: vi.fn(),
     getUpstreamKeyForUser: vi.fn(),

@@ -48,6 +48,13 @@ import { maybeBrandVideoUrl } from '@/lib/seedance/volc-brand';
 import { maybeStoreVideoToCustomerOss } from '@/lib/seedance/customer-oss-video';
 import { isTerminalTaskFailure, type UpstreamErrorCategory } from '@/lib/seedance/upstream-error';
 import { invalidatePollCache, pollWithCache } from './poll-cache';
+import {
+    newRequestLogCtx,
+    sanitizeRequestBody,
+    shouldLogPoll,
+    writeRequestLog,
+    type RequestLogCtx,
+} from './request-log';
 
 /** 对客响应形态:'v1' = 我们现有形;'ark' = 火山方舟官方形(/api/v3/…)。 */
 export type ClientFormat = 'v1' | 'ark';
@@ -538,6 +545,15 @@ async function translateVolcAssetRefs(body: Record<string, unknown>): Promise<Re
 }
 
 async function handleSubmit(req: NextRequest, format: ClientFormat = 'v1'): Promise<NextResponse> {
+    // 请求日志(2026-09-03):submit 全量落库(含被拒的)。wrapper 形 —— inner 沿途填 ctx,
+    // 这里统一写行(fire-and-forget,绝不影响客户响应)。
+    const ctx = newRequestLogCtx('submit', format, req);
+    const res = await handleSubmitInner(req, format, ctx);
+    writeRequestLog(ctx, res);
+    return res;
+}
+
+async function handleSubmitInner(req: NextRequest, format: ClientFormat, ctx: RequestLogCtx): Promise<NextResponse> {
     // 先读原始 body(AK/SK 验签对原始字节算 hash),再解析 + 归一。
     // 到达对账三连(2026-09-03 weirdo 5 并发只见 4 个,无日志只能间接推断):
     // ① body 读失败(客户端上行中断/超时)② 非 JSON ③ 正常到达 —— 三条路都留痕,
@@ -566,6 +582,9 @@ async function handleSubmit(req: NextRequest, format: ClientFormat = 'v1'): Prom
         client_request_id: typeof body.client_request_id === 'string' ? body.client_request_id : undefined,
         bytes: rawBody.length,
     });
+    // 入参落日志(脱媒 + 截断,客户传的原始参数形);client_request_id 单列供对账精确检索
+    ctx.requestBody = sanitizeRequestBody(rawBody);
+    ctx.clientRequestId = typeof body.client_request_id === 'string' ? body.client_request_id : null;
 
     // 调用方是不是 volc 客户?(鉴权前的探测,只用来决定「模型名与未知字段按哪个渠道处理」)
     // ⚠️ 同一个火山原生 id 对 cn 客户与 volc 客户是两个意思 —— 2026-08-26 客户实测:
@@ -591,6 +610,8 @@ async function handleSubmit(req: NextRequest, format: ClientFormat = 'v1'): Prom
 
     const model = String(body.model || '');
     const isVolc = regionForModel(model) === 'volc';
+    ctx.model = model || null;
+    ctx.region = regionForModel(model);
 
     // 剥 asset:// 前缀(对 v1 也安全:v1 客户素材引用是裸 id,归一后不变)——
     // 仅非 volc:后面 resolveAssetRefs 认裸 asset-…。「火山」渠道素材由上游 provider
@@ -603,6 +624,8 @@ async function handleSubmit(req: NextRequest, format: ClientFormat = 'v1'): Prom
     // AK/SK 验签用原始 body(客户签的是含 doubao 名的原始字节,不能用归一后的)。
     const cust = await resolveOr401(req, regionForModel(model), rawBody);
     if (cust instanceof NextResponse) return cust;
+    ctx.userId = cust.userId;
+    ctx.keyId = cust.keyId;
 
     // P3 素材库引用:asset-…/group-… → R2 公网 URL(必须在 ref/hasVideo 检测之前,
     // 视频素材引用也要计入含视频费率档)。未知/非本人 id → 400。
@@ -700,11 +723,16 @@ async function handleSubmit(req: NextRequest, format: ClientFormat = 'v1'): Prom
         console.warn('[enterprise-proxy] balance gate skipped (lookup failed)', e);
     }
 
+    ctx.region = map.region ?? 'cn';
+    const upstreamT0 = Date.now();
     const res =
         map.region === 'volc'
             ? await submitVolcVideo(body, { clientModel: adapterModel, resolution: map.resolution, duration })
             : await submitVideoWithKey({ ...body, model: adapterModel }, `Bearer ${cust.upstreamKey}`);
     const text = await res.text();
+    ctx.upstreamMs = Date.now() - upstreamT0;
+    ctx.upstreamStatus = res.status;
+    ctx.upstreamBody = text;
     if (!res.ok) {
         // 带客户身份落日志(适配器层只有上游视角):upstream_error 投诉可直接定位到人
         console.warn('[enterprise-proxy] submit error', {
@@ -723,6 +751,7 @@ async function handleSubmit(req: NextRequest, format: ClientFormat = 'v1'): Prom
     }
     const taskId = j?.task_id || j?.id;
     if (!taskId) return errJson(502, 'upstream_error', 'no task_id from upstream');
+    ctx.taskId = taskId;
     // 响应 model 回显客户调用的名字(短名路径下适配器回显的是内部长名)
     if (j && j.model && j.model !== model) j.model = model;
 
@@ -764,14 +793,34 @@ async function handleSubmit(req: NextRequest, format: ClientFormat = 'v1'): Prom
 
 /** 轮询:归属 + tier + 版本三门(IDOR)→ 直调适配器核心(按版本 base)→ 完成写 tokens + 幂等扣费 → 透传响应。 */
 async function handlePoll(req: NextRequest, taskId: string, format: ClientFormat = 'v1'): Promise<NextResponse> {
+    // 请求日志(2026-09-03):poll 只落有信息量的行(终态迁移 / 上游真报错 / 我们拒的),
+    // 判定见 shouldLogPoll —— 例行轮询高峰 350 次/分钟,全量落库没意义。
+    const ctx = newRequestLogCtx('poll', format, req);
+    ctx.taskId = taskId;
+    const res = await handlePollInner(req, taskId, format, ctx);
+    if (shouldLogPoll(ctx, res.status)) writeRequestLog(ctx, res);
+    return res;
+}
+
+async function handlePollInner(
+    req: NextRequest,
+    taskId: string,
+    format: ClientFormat,
+    ctx: RequestLogCtx,
+): Promise<NextResponse> {
     const cust = await resolveOr401(req);
     if (cust instanceof NextResponse) return cust;
+    ctx.userId = cust.userId;
+    ctx.keyId = cust.keyId;
 
     const task = await prisma.seedanceVideoTask.findUnique({ where: { id: taskId } });
     if (!task || task.tier !== ENTERPRISE_TIER || task.user_id !== cust.userId) {
         return errJson(404, 'not_found', 'task not found');
     }
     const taskRegion: SeedanceRegion = regionForModel(task.model);
+    ctx.model = task.model;
+    ctx.region = taskRegion;
+    ctx.statusBefore = task.status;
     // 版本门只对 sk-ent(绑 region)生效:本人任务但 key 版本不符 → 提示换对应版本 key。
     // volc 用平台 env、AK/SK 账号级(能查自己所有渠道任务)→ 不做版本门(归属已由 user_id 把关)。
     if (taskRegion !== 'volc' && !cust.accountLevel && cust.region !== taskRegion) {
@@ -853,6 +902,7 @@ async function handlePoll(req: NextRequest, taskId: string, format: ClientFormat
     // 已终态失败短路:库里已 failed 就不再打上游(上游会清除失败任务,再查返「任务不存在」,
     // 真实原因反而丢失)。
     if (task.status === 'failed') {
+        ctx.statusAfter = 'failed'; // 与 statusBefore 相同 → 不落行(终态迁移那次已记过)
         return failedResponse(task.fail_reason || 'generation failed');
     }
 
@@ -868,6 +918,7 @@ async function handlePoll(req: NextRequest, taskId: string, format: ClientFormat
     // 短 TTL 缓存 + 同任务并发合流:客户的轮询频率不再 1:1 传导到上游(见 poll-cache 头部)。
     // 缓存的是原始 (status, text),下游逻辑照常全跑 —— 落 tokens / 幂等扣费 / 客户 OSS 转存
     // 一个不少,对客语义完全不变。
+    const pollT0 = Date.now();
     const { result: upstream, cached } = await pollWithCache(taskId, async () => {
         const r =
             taskRegion === 'volc'
@@ -877,6 +928,10 @@ async function handlePoll(req: NextRequest, taskId: string, format: ClientFormat
     });
     const res = { ok: upstream.status < 400, status: upstream.status };
     const text = upstream.text;
+    ctx.upstreamMs = Date.now() - pollT0;
+    ctx.upstreamStatus = upstream.status;
+    ctx.upstreamBody = text;
+    ctx.cacheHit = cached;
     if (!res.ok) {
         // 上游用 HTTP 4xx 表达【任务已废】(如 seedance 2.5 的 TaskTypeConstraint、内容审核、
         // 参数不合法):这类再轮询多少次都是同一个错。以前我们一律当「轮询瞬时失败」透传,
@@ -908,6 +963,7 @@ async function handlePoll(req: NextRequest, taskId: string, format: ClientFormat
             body: text.slice(0, 2000),
         });
         if (terminal) {
+            ctx.statusAfter = 'failed';
             const reason = failMsg || '上游判定任务失败';
             await prisma.seedanceVideoTask
                 .updateMany({ where: { id: taskId }, data: { status: 'failed', fail_reason: reason.slice(0, 500) } })
@@ -929,6 +985,8 @@ async function handlePoll(req: NextRequest, taskId: string, format: ClientFormat
     } catch {
         j = null;
     }
+    ctx.statusAfter = typeof j?.status === 'string' ? j.status : task.status;
+    if (typeof j?.vendor_task_id === 'string') ctx.vendorTaskId = j.vendor_task_id;
 
     if (j && j.status === 'completed') {
         const usage = j.usage as { completion_tokens?: number; total_tokens?: number } | undefined;

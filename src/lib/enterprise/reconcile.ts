@@ -19,6 +19,29 @@ import { pollVolcVideo } from '@/lib/seedance/kuaizi-adapter';
 import { isTerminalTaskFailure, type UpstreamErrorCategory } from '@/lib/seedance/upstream-error';
 import { getUpstreamKeyForUser } from './keys';
 import { ENTERPRISE_TIER, chargeEnterpriseVideoTask } from './billing';
+import { writeRequestLog, type RequestLogCtx } from './request-log';
+
+/** 对账动作落请求日志(kind='reconcile'):僵尸任务是谁补扣/标失败的,后台可查可导。 */
+function logReconcile(
+    task: { id: string; model: string },
+    userId: string,
+    startedAt: number,
+    outcome: string,
+    upstream?: { status?: number | null; body?: string | null },
+): void {
+    const ctx: RequestLogCtx = {
+        kind: 'reconcile',
+        startedAt,
+        userId,
+        taskId: task.id,
+        model: task.model,
+        region: regionForModel(task.model),
+        outcome,
+        upstreamStatus: upstream?.status ?? null,
+        upstreamBody: upstream?.body ?? null,
+    };
+    writeRequestLog(ctx);
+}
 
 const STALE_AFTER_MS = 90 * 1000; // 提交 90s 内的任务不管(客户大概率还在正常轮询)
 const EXPIRE_AFTER_MS = 48 * 60 * 60 * 1000; // 上游结果保留期
@@ -51,6 +74,7 @@ export async function reconcileStaleTasks(userId: string): Promise<void> {
     const keyCache = new Map<string, string | null>();
     for (const task of stale) {
         try {
+            const t0 = Date.now();
             const expired = Date.now() - task.created_at.getTime() > EXPIRE_AFTER_MS;
             const region = regionForModel(task.model);
 
@@ -71,7 +95,10 @@ export async function reconcileStaleTasks(userId: string): Promise<void> {
                 }
                 if (!upstreamKey) {
                     // 该版本上游 key 已被移除:老任务无法回查。超保留期的直接过期终态。
-                    if (expired) await markExpired(task.id);
+                    if (expired) {
+                        await markExpired(task.id);
+                        logReconcile(task, userId, t0, 'expired');
+                    }
                     continue;
                 }
                 res = await pollVideoWithKey(task.id, `Bearer ${upstreamKey}`, region);
@@ -89,8 +116,13 @@ export async function reconcileStaleTasks(userId: string): Promise<void> {
                         data: { status: 'failed', fail_reason: (e?.message || '上游判定任务失败').slice(0, 500) },
                     });
                     console.log('[enterprise-reconcile] terminalized', { id: task.id, category: e?.category });
+                    logReconcile(task, userId, t0, 'terminalized', {
+                        status: res.status,
+                        body: j ? JSON.stringify(j) : null,
+                    });
                 } else if (expired) {
                     await markExpired(task.id);
+                    logReconcile(task, userId, t0, 'expired', { status: res.status });
                 }
                 continue;
             }
@@ -106,6 +138,10 @@ export async function reconcileStaleTasks(userId: string): Promise<void> {
                     const r = await chargeEnterpriseVideoTask(task.id);
                     if (r.outcome === 'charged') {
                         console.log('[enterprise-reconcile] back-charged', { id: task.id, cost: r.costCny });
+                        logReconcile(task, userId, t0, 'back_charged', {
+                            status: res.status,
+                            body: JSON.stringify(j),
+                        });
                     }
                 }
             } else if (status === 'failed') {
@@ -116,8 +152,10 @@ export async function reconcileStaleTasks(userId: string): Promise<void> {
                         fail_reason: typeof j.fail_reason === 'string' ? j.fail_reason.slice(0, 500) : null,
                     },
                 });
+                logReconcile(task, userId, t0, 'marked_failed', { status: res.status, body: JSON.stringify(j) });
             } else if (expired) {
                 await markExpired(task.id);
+                logReconcile(task, userId, t0, 'expired', { status: res.status });
             }
             // 仍在跑且未超保留期 → 留给下次
         } catch (e) {

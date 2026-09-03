@@ -4,7 +4,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { db, pollVideoWithKey, pollVolcVideo, getUpstreamKeyForUser, chargeEnterpriseVideoTask } = vi.hoisted(() => ({
-    db: { seedanceVideoTask: { findMany: vi.fn(), updateMany: vi.fn() } },
+    db: {
+        seedanceVideoTask: { findMany: vi.fn(), updateMany: vi.fn() },
+        enterpriseRequestLog: { create: vi.fn(async () => ({})) },
+    },
     pollVideoWithKey: vi.fn(),
     pollVolcVideo: vi.fn(),
     getUpstreamKeyForUser: vi.fn(),
