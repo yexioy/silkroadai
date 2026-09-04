@@ -48,10 +48,21 @@ function err(status: number, code: string, message: string, category?: string) {
     );
 }
 
-export function getKuaiziConfig(): { base: string; key: string } | null {
-    const key = process.env.ENTERPRISE_KUAIZI_KEY;
+/**
+ * 2026-09-04 起支持【按客户】的筷子 key:客户在 enterprise_upstream_keys(region='volc')
+ * 配了真实 kz- key 时优先用它(独立素材库 + 各自渠道能力,如活体检测),否则回落平台
+ * env key。起因:上游把活体检测挪到了新渠道,老渠道被关 —— 整体换 key 会让存量客户的
+ * 素材/任务全部失联,按客户切才能平滑过渡。
+ */
+export function getKuaiziConfig(overrideKey?: string): { base: string; key: string } | null {
+    const key = overrideKey || process.env.ENTERPRISE_KUAIZI_KEY;
     if (!key) return null;
     return { base: (process.env.ENTERPRISE_KUAIZI_BASE_URL || DEFAULT_BASE).replace(/\/$/, ''), key };
+}
+
+/** 客户 upstream key 行里存的是真实筷子 key 还是占位符?(占位 = 走平台 env key) */
+export function customerKuaiziKey(upstreamKey: string | undefined | null): string | undefined {
+    return upstreamKey?.startsWith('kz-') ? upstreamKey : undefined;
 }
 
 // 上游 `vendor_task_id` = 渠道侧原始任务号。落方舟时它就是**火山官方任务 id**(cgt-…),
@@ -266,6 +277,8 @@ function buildContent(body: Record<string, unknown>): unknown[] | null {
 }
 
 export interface KuaiziSubmitOptions {
+    /** 客户自己的筷子 key(kz-);缺省用平台 env key。 */
+    upstreamKey?: string;
     /** 对客模型名(VOLC_MODELS 的 key);caller(proxy 短名解析)已校验。 */
     clientModel: string;
     resolution: '480p' | '720p' | '1080p' | '4k';
@@ -278,7 +291,7 @@ export interface KuaiziSubmitOptions {
  * 返回归一形 {id, task_id, model, status} 供 proxy.handleSubmit 记账 —— id 已伪装成 cgt- 形。
  */
 export async function submitVolcVideo(body: Record<string, unknown>, opts: KuaiziSubmitOptions): Promise<NextResponse> {
-    const cfg = getKuaiziConfig();
+    const cfg = getKuaiziConfig(opts.upstreamKey);
     if (!cfg) return err(503, 'temporarily_unavailable', '火山渠道未配置,请联系服务方');
 
     const spec = VOLC_MODELS[opts.clientModel];
@@ -456,8 +469,8 @@ function mapStatus(s: unknown): 'queued' | 'in_progress' | 'completed' | 'failed
  * 入参 id 是对客形(cgt-X):打上游前还原成 kz-cgt-X;404 时用原始 id 回退一次
  * (兜住上一版 provider 遗留的 task_/cgt- 形 id,以及上游直接返 cgt- 的罕见情形)。
  */
-export async function pollVolcVideo(id: string): Promise<NextResponse> {
-    const cfg = getKuaiziConfig();
+export async function pollVolcVideo(id: string, upstreamKey?: string): Promise<NextResponse> {
+    const cfg = getKuaiziConfig(upstreamKey);
     if (!cfg) return err(503, 'temporarily_unavailable', '火山渠道未配置,请联系服务方');
 
     const fetchTask = (taskId: string) =>

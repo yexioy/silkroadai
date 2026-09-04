@@ -125,8 +125,8 @@ function kuaiziLiveness(): boolean {
 }
 
 /** 筷子活体检测:与素材库同一个 Action 端点 + ApiKey 头。 */
-async function callKuaiziLiveness<T>(action: string, body: Record<string, unknown>): Promise<T> {
-    const key = process.env.ENTERPRISE_KUAIZI_KEY;
+async function callKuaiziLiveness<T>(action: string, body: Record<string, unknown>, apiKey?: string): Promise<T> {
+    const key = apiKey || process.env.ENTERPRISE_KUAIZI_KEY;
     if (!key) throw new RealPersonError(503, 'ServiceUnavailable', '真人认证渠道未配置,请联系服务方');
     const base = (process.env.ENTERPRISE_KUAIZI_BASE_URL || 'https://aiopenapi.kuaizi.cn').replace(/\/$/, '');
     const url = `${base}/ai-open-platform-api/api/support/v1/asset?Action=${action}&Version=2024-01-01`;
@@ -158,26 +158,42 @@ async function callKuaiziLiveness<T>(action: string, body: Record<string, unknow
         if (action === 'GetVisualValidateResult') {
             throw new RealPersonError(404, 'ValidateNotReady', '真人认证尚未完成 —— 请在手机上完成活体后重试');
         }
+        // 净化(2026-09-04 客户实测:上游把「rpc error: code = InvalidArgument desc = 该渠道
+        // 暂不支持活体检测」整串裸奔,我们此前原样透传 —— rpc 包装/内部码绝不对客)。
+        const rawMsg = e?.Message || '';
+        if (/不支持活体检测/.test(rawMsg)) {
+            throw new RealPersonError(
+                503,
+                'ServiceUnavailable',
+                '真人认证服务暂不可用(渠道未开通活体检测)—— 请联系服务方',
+            );
+        }
+        const clean = rawMsg
+            .replace(/create visual validate session failed:\s*/gi, '')
+            .replace(/rpc error:.*?desc\s*=\s*/gi, '')
+            .trim();
         throw new RealPersonError(
             res.status >= 400 ? res.status : 400,
             e?.Code || 'UpstreamError',
-            e?.Message || '真人认证失败',
+            clean || '真人认证失败',
         );
     }
     return (j.Result ?? {}) as T;
 }
 
 /** 创建真人认证会话(火山 Action: CreateVisualValidateSession)。 */
-export async function createVisualValidateSession(callbackUrl?: string): Promise<CreateSessionResult> {
+export async function createVisualValidateSession(callbackUrl?: string, apiKey?: string): Promise<CreateSessionResult> {
     if (!kuaiziLiveness()) {
         // 727 provider:/sessions 无入参(CallbackURL/ProjectName 上游不消费,忽略)
         return callProvider<CreateSessionResult>('/api/v1/real-person-auth/sessions', {});
     }
     // 筷子必填 CallbackURL:客户没传就用门户自身域名兜底(该地址只是活体完成后的跳转目标)
     const cb = callbackUrl || process.env.ENTERPRISE_BASE_URL || 'https://galaxytoken.ai';
-    const r = await callKuaiziLiveness<{ BytedToken?: string; H5Link?: string }>('CreateVisualValidateSession', {
-        CallbackURL: cb,
-    });
+    const r = await callKuaiziLiveness<{ BytedToken?: string; H5Link?: string }>(
+        'CreateVisualValidateSession',
+        { CallbackURL: cb },
+        apiKey,
+    );
     if (!r.BytedToken || !r.H5Link) {
         throw new RealPersonError(502, 'UpstreamError', '真人认证上游未返回会话信息,请稍后重试');
     }
@@ -185,14 +201,14 @@ export async function createVisualValidateSession(callbackUrl?: string): Promise
 }
 
 /** 用 bytedToken 换真人素材组 groupId(火山 Action: GetVisualValidateResult)。 */
-export async function getVisualValidateGroupId(bytedToken: string): Promise<string> {
+export async function getVisualValidateGroupId(bytedToken: string, apiKey?: string): Promise<string> {
     if (!kuaiziLiveness()) {
         // 727 provider 接口 13:data 为 groupId 字符串
         return callProvider<string>('/api/v1/real-person-auth/asset-group/by-byted-token', { bytedToken });
     }
     // ⚠️ 成功形态未经真人实测(需要真人在手机上做完活体才能验)。上游 Result 可能是
     // 裸字符串,也可能是 { GroupId } / { Id } —— 三种都认,拿不到就报可操作错误而不是崩。
-    const r = await callKuaiziLiveness<unknown>('GetVisualValidateResult', { BytedToken: bytedToken });
+    const r = await callKuaiziLiveness<unknown>('GetVisualValidateResult', { BytedToken: bytedToken }, apiKey);
     if (typeof r === 'string' && r) return r;
     const o = (r ?? {}) as { GroupId?: unknown; Id?: unknown };
     const gid = typeof o.GroupId === 'string' ? o.GroupId : typeof o.Id === 'string' ? o.Id : '';

@@ -94,7 +94,7 @@ describe('GetVisualValidateResult', () => {
         expect(res.status).toBe(200);
         const j = (await res.json()) as { Result: { GroupId: string } };
         expect(j.Result.GroupId).toBe('group-20260729-abc');
-        expect(getGroupId).toHaveBeenCalledWith('byted-x');
+        expect(getGroupId).toHaveBeenCalledWith('byted-x', undefined);
     });
 
     it('缺 BytedToken → 400', async () => {

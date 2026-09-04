@@ -705,7 +705,7 @@ describe('归一短名(2026-07-20)', () => {
         // CUSTOMER.region = 'cn'(AK/SK 账号级默认),但 volc 任务不应 403
         const res = await handleEnterpriseV1(req('GET', '/v1/video/generations/task_v9'), '/video/generations/task_v9');
         expect(res.status).toBe(200);
-        expect(pollVolcVideo).toHaveBeenCalledWith('task_v9');
+        expect(pollVolcVideo).toHaveBeenCalledWith('task_v9', undefined);
         expect(pollVideoWithKey).not.toHaveBeenCalled();
     });
 
