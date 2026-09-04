@@ -124,20 +124,33 @@ async function call<T>(action: string, body: Record<string, unknown>, clientId?:
         });
     } catch (e) {
         console.warn('[kuaizi-assets] unreachable', { action, err: String(e) });
-        throw new RealPersonError(503, 'ServiceUnavailable', '素材库上游暂时不可达,请稍后重试');
+        throw new RealPersonError(503, 'ServiceUnavailable', '素材库上游暂时不可达,请稍后重试').withUpstream(
+            undefined,
+            String(e),
+        );
     }
+    // 上游原文(2026-09-04):失败时随错误带出去落请求日志 upstream_body —— 此前这里的
+    // 真实原因只在 docker logs(容器重建即丢),admin 在日志页看不到任何上游信息。
+    const text = await res.text();
     let j: KuaiziEnvelope<T>;
     try {
-        j = (await res.json()) as KuaiziEnvelope<T>;
+        j = JSON.parse(text) as KuaiziEnvelope<T>;
     } catch {
-        throw new RealPersonError(502, 'UpstreamError', `素材库上游返回非 JSON(HTTP ${res.status})`);
+        throw new RealPersonError(502, 'UpstreamError', `素材库上游返回非 JSON(HTTP ${res.status})`).withUpstream(
+            res.status,
+            text,
+        );
     }
     const upErr = j.ResponseMetadata?.Error;
     if (upErr?.Code || !res.ok) {
         // 401 = 我们的平台凭证问题,不是客户的错 —— 不把上游文案原样抛给客户。
         if (res.status === 401) {
             console.error('[kuaizi-assets] upstream auth failed (platform credential)', { action });
-            throw new RealPersonError(502, 'UpstreamError', '素材库上游鉴权失败(平台凭证问题),请联系服务方');
+            throw new RealPersonError(
+                502,
+                'UpstreamError',
+                '素材库上游鉴权失败(平台凭证问题),请联系服务方',
+            ).withUpstream(res.status, text);
         }
         console.warn('[kuaizi-assets] action failed', {
             action,
@@ -145,7 +158,10 @@ async function call<T>(action: string, body: Record<string, unknown>, clientId?:
             code: upErr?.Code,
             message: upErr?.Message,
         });
-        throw mapUpstreamError(action, res.status, upErr?.Code, upErr?.Message, clientId);
+        throw mapUpstreamError(action, res.status, upErr?.Code, upErr?.Message, clientId).withUpstream(
+            res.status,
+            text,
+        );
     }
     return (j.Result ?? {}) as T;
 }
@@ -318,8 +334,18 @@ async function waitForVendorAssetId(upstreamId: string): Promise<string> {
         const vendorId = str(last.VendorAssetId);
         if (vendorId) return vendorId;
         // 素材已终态却仍无火山号 = 上游那边根本没受理成功,再等也不会有。
+        // 上游行原文(可能含具体失败原因字段)落 docker 日志 + 随错误带进请求日志 ——
+        // 2026-09-04 之前这里静默抛错,admin 在日志页只见「素材入库失败」四个字,查无可查。
         if (last.Status === 'Failed') {
-            throw new RealPersonError(502, 'AssetCreateFailed', '素材入库失败,请检查素材链接后重试');
+            const row = JSON.stringify(last);
+            console.warn('[kuaizi-assets] asset ingest FAILED upstream(原文)', {
+                upstreamId,
+                row: row.slice(0, 2000),
+            });
+            throw new RealPersonError(502, 'AssetCreateFailed', '素材入库失败,请检查素材链接后重试').withUpstream(
+                200,
+                row,
+            );
         }
         if (Date.now() + VENDOR_ID_POLL_MS > deadline) {
             console.error('[kuaizi-assets] vendor asset id timeout (上游已建,对客报错 → 孤儿素材)', {
@@ -327,7 +353,11 @@ async function waitForVendorAssetId(upstreamId: string): Promise<string> {
                 status: last.Status,
                 waitedMs: vendorWaitMs(),
             });
-            throw new RealPersonError(504, 'AssetPending', '素材入库超时 —— 上游尚未返回素材编号,请稍后重新上传');
+            throw new RealPersonError(
+                504,
+                'AssetPending',
+                '素材入库超时 —— 上游尚未返回素材编号,请稍后重新上传',
+            ).withUpstream(200, JSON.stringify(last));
         }
         await new Promise((r) => setTimeout(r, VENDOR_ID_POLL_MS));
     }
@@ -350,11 +380,19 @@ export async function handleKuaiziAssetAction(action: string, body: unknown, use
             // 建组是【同步】渠道调用,火山组号创建即返回 —— 不必像 CreateAsset 那样压着等。
             const gUp = str(d.Id);
             const gVendor = str(d.VendorGroupId);
-            if (!gUp) throw new RealPersonError(502, 'UpstreamError', '素材组创建失败(上游未返回编号)');
+            if (!gUp)
+                throw new RealPersonError(502, 'UpstreamError', '素材组创建失败(上游未返回编号)').withUpstream(
+                    200,
+                    JSON.stringify(d),
+                );
             if (!gVendor) {
                 // 对客承诺的是火山原生号,拿不到就报错 —— 不吐一个非火山的号(2026-08-19 拍板)。
                 console.error('[kuaizi-assets] CreateAssetGroup 未返回 VendorGroupId', { upstreamId: gUp });
-                throw new RealPersonError(502, 'UpstreamError', '素材组创建失败(上游未返回火山编号),请重试');
+                throw new RealPersonError(
+                    502,
+                    'UpstreamError',
+                    '素材组创建失败(上游未返回火山编号),请重试',
+                ).withUpstream(200, JSON.stringify(d));
             }
             await rememberVolcId(gVendor, gUp, 'group', userId);
             await saveGroupMeta(gVendor, userId, p.data.Name, p.data.Description);
@@ -437,7 +475,11 @@ export async function handleKuaiziAssetAction(action: string, body: unknown, use
                 ...(p.data.Name !== undefined ? { Name: p.data.Name } : {}),
             });
             const aUp = str(d.Id);
-            if (!aUp) throw new RealPersonError(502, 'UpstreamError', '素材创建失败(上游未返回编号)');
+            if (!aUp)
+                throw new RealPersonError(502, 'UpstreamError', '素材创建失败(上游未返回编号)').withUpstream(
+                    200,
+                    JSON.stringify(d),
+                );
             // 压住等火山素材号(实测 ~7.5s);拿到才吐给客户 —— 见 waitForVendorAssetId。
             const aVendor = await waitForVendorAssetId(aUp);
             await rememberVolcId(aVendor, aUp, 'asset', userId);

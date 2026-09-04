@@ -552,3 +552,56 @@ describe('火山原生 id / URL 归一(2026-08-19)+ id 判据收紧', () => {
         expect(shouldUseKuaiziAssets('GetAsset', { Id: '1800657071180349888' })).toBe(true);
     });
 });
+
+describe('上游细节随错误带出(2026-09-04 请求日志排障)', () => {
+    it('Action 失败:err.upstream 带上游 HTTP status + 响应原文', async () => {
+        vi.spyOn(global, 'fetch').mockResolvedValue(
+            new Response(
+                JSON.stringify({
+                    ResponseMetadata: { Error: { Code: 'InvalidParameter', Message: 'invalid Id: 999' } },
+                }),
+                { status: 400 },
+            ),
+        );
+        const e = await handleKuaiziAssetAction('GetAsset', { Id: '999' }).then(
+            () => null,
+            (err: RealPersonError) => err,
+        );
+        expect(e).toBeInstanceOf(RealPersonError);
+        expect(e!.upstream?.status).toBe(400);
+        expect(String(e!.upstream?.body)).toContain('invalid Id: 999');
+    });
+
+    it('CreateAsset 入库失败(Status=Failed):上游行原文(含 Reason)进 err.upstream + docker warn', async () => {
+        vi.spyOn(global, 'fetch').mockImplementation((_u) => {
+            const isCreate = String(_u).includes('Action=CreateAsset');
+            return Promise.resolve(
+                new Response(
+                    envelope(
+                        isCreate
+                            ? { Id: 'kz-up-1' }
+                            : { Id: 'kz-up-1', Status: 'Failed', Reason: 'fetch source url failed 403' },
+                    ),
+                    { status: 200 },
+                ),
+            );
+        });
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const e = await handleKuaiziAssetAction('CreateAsset', {
+            GroupId: '1800657071180349888',
+            URL: 'https://cdn.example.com/a.png',
+            AssetType: 'image',
+        }).then(
+            () => null,
+            (err: RealPersonError) => err,
+        );
+        expect(e).toBeInstanceOf(RealPersonError);
+        expect(e!.code).toBe('AssetCreateFailed');
+        expect(String(e!.upstream?.body)).toContain('fetch source url failed 403');
+        expect(warn).toHaveBeenCalledWith(
+            expect.stringContaining('asset ingest FAILED upstream'),
+            expect.objectContaining({ upstreamId: 'kz-up-1' }),
+        );
+        warn.mockRestore();
+    });
+});
