@@ -43,10 +43,9 @@ export default async function EnterpriseAdminLayout({ children }: { children: Re
                         </nav>
                     </div>
                     <div className="flex items-center gap-3 text-sm text-gray-300">
-                        <span>
-                            {admin.user.email}
-                            {!isSuper && <span className="ml-1 text-xs text-gray-500">(次级管理员)</span>}
-                        </span>
+                        {/* 不给次级管理员看到自己的等级标识(operator 要求 2026-09-04);
+                            等级差异只体现在导航可见性(监督面入口仅 super),对本人不点破。 */}
+                        <span>{admin.user.email}</span>
                         <AdminLogoutButton />
                     </div>
                 </div>
