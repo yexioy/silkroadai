@@ -488,6 +488,81 @@ describe('火山原生 id / URL 归一(2026-08-19)+ id 判据收紧', () => {
         expect(JSON.stringify(sent.Filter ?? {})).not.toContain('产品');
     });
 
+    // 2026-09-04 客户契约测试:火山官方 ListAssetGroups 支持 Filter.GroupIds,我们此前
+    // 静默忽略(schema 剥掉);上游实测也忽略 → 必须本地过滤。
+    it('ListAssetGroups Filter.GroupIds:按组 id 列表过滤(火山号与上游号都认)', async () => {
+        groupMetaStore.set('group-20260904000001-aaaa1', { name: '组一', description: null });
+        groupMetaStore.set('group-20260904000002-aaaa2', { name: '组二', description: null });
+        vi.spyOn(global, 'fetch').mockImplementation(() =>
+            Promise.resolve(
+                new Response(
+                    envelope({
+                        Items: [
+                            { Id: '101', Name: 'g-x1', VendorGroupId: 'group-20260904000001-aaaa1' },
+                            { Id: '102', Name: 'g-x2', VendorGroupId: 'group-20260904000002-aaaa2' },
+                            { Id: '103', Name: '老组无vendor' },
+                        ],
+                        TotalCount: 3,
+                        PageNumber: 1,
+                        PageSize: 100,
+                    }),
+                    { status: 200 },
+                ),
+            ),
+        );
+        // 火山号过滤
+        const r1 = (await handleKuaiziAssetAction('ListAssetGroups', {
+            PageNumber: 1,
+            PageSize: 20,
+            Filter: { GroupIds: ['group-20260904000002-aaaa2'] },
+        })) as { Items: Array<{ Id: string }>; TotalCount: number };
+        expect(r1.TotalCount).toBe(1);
+        expect(r1.Items[0].Id).toBe('group-20260904000002-aaaa2');
+        // 上游号过滤(存量客户手里的)—— 宽进
+        const r2 = (await handleKuaiziAssetAction('ListAssetGroups', {
+            PageNumber: 1,
+            PageSize: 20,
+            Filter: { GroupIds: ['103'] },
+        })) as { Items: Array<{ Id: string }>; TotalCount: number };
+        expect(r2.TotalCount).toBe(1);
+        expect(r2.Items[0].Id).toBe('103');
+        // 查无 → 空结果而不是全量(客户报的正是「忽略后返回全量」)
+        const r3 = (await handleKuaiziAssetAction('ListAssetGroups', {
+            PageNumber: 1,
+            PageSize: 20,
+            Filter: { GroupIds: ['group-19990101000000-none0'] },
+        })) as { TotalCount: number };
+        expect(r3.TotalCount).toBe(0);
+    });
+
+    it('GroupIds 与 Name 同时给 → 交集', async () => {
+        groupMetaStore.set('group-20260904000001-aaaa1', { name: '产品图A', description: null });
+        groupMetaStore.set('group-20260904000002-aaaa2', { name: '产品图B', description: null });
+        vi.spyOn(global, 'fetch').mockImplementation(() =>
+            Promise.resolve(
+                new Response(
+                    envelope({
+                        Items: [
+                            { Id: '101', Name: 'g-x1', VendorGroupId: 'group-20260904000001-aaaa1' },
+                            { Id: '102', Name: 'g-x2', VendorGroupId: 'group-20260904000002-aaaa2' },
+                        ],
+                        TotalCount: 2,
+                        PageNumber: 1,
+                        PageSize: 100,
+                    }),
+                    { status: 200 },
+                ),
+            ),
+        );
+        const r = (await handleKuaiziAssetAction('ListAssetGroups', {
+            PageNumber: 1,
+            PageSize: 20,
+            Filter: { Name: '产品图', GroupIds: ['group-20260904000001-aaaa1'] },
+        })) as { Items: Array<{ Name: string }>; TotalCount: number };
+        expect(r.TotalCount).toBe(1);
+        expect(r.Items[0].Name).toBe('产品图A');
+    });
+
     it('同名 1062 类 SQL 报错绝不对客裸奔', async () => {
         vi.spyOn(global, 'fetch').mockResolvedValue(
             new Response(

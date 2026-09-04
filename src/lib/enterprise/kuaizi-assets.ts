@@ -210,7 +210,13 @@ const listAssetsSchema = z.object({
 });
 const listGroupsSchema = z.object({
     Filter: z
-        .object({ Name: z.string().trim().max(64).optional(), GroupType: z.literal('AIGC').optional() })
+        .object({
+            Name: z.string().trim().max(64).optional(),
+            GroupType: z.literal('AIGC').optional(),
+            // 火山官方支持按组 id 列表过滤(2026-09-04 客户契约测试指出我们静默忽略)。
+            // 上游实测【也】忽略该参数 → 与 Name 同样走本地过滤。
+            GroupIds: z.array(z.string().trim().min(1).max(80)).max(50).optional(),
+        })
         .optional(),
     ...pageSchema,
 });
@@ -409,8 +415,9 @@ export async function handleKuaiziAssetAction(
             const p = listGroupsSchema.safeParse(body);
             if (!p.success) badParam(p.error);
             const nameFilter = p.data.Filter?.Name;
+            const idFilter = p.data.Filter?.GroupIds;
             const upFilter = p.data.Filter?.GroupType ? { GroupType: p.data.Filter.GroupType } : undefined;
-            if (!nameFilter) {
+            if (!nameFilter && !idFilter?.length) {
                 const d = await kcall<UpstreamPage<UpstreamRow>>('ListAssetGroups', {
                     PageNumber: p.data.PageNumber,
                     PageSize: p.data.PageSize,
@@ -418,8 +425,10 @@ export async function handleKuaiziAssetAction(
                 });
                 return nativePage(d, 'group', p.data.PageNumber, p.data.PageSize, userId);
             }
-            // Name 筛选:名字归我们所有,上游只有机器名 —— Name 不能转发给上游,
-            // 改成拉全量(封顶 500)→ 覆盖名字 → 本地过滤(contains 语义)→ 本地分页。
+            // Name / GroupIds 筛选一律本地做:
+            //  - Name:名字归我们所有,上游只有机器名,转发必查空
+            //  - GroupIds:火山官方支持,上游实测【忽略】该参数(返回全量)—— 转发无效
+            // 拉全量(封顶 500)→ 覆盖 → 过滤 → 本地分页。
             const all: UpstreamRow[] = [];
             for (let page = 1; page <= 5; page++) {
                 const d = await kcall<UpstreamPage<UpstreamRow>>('ListAssetGroups', {
@@ -432,10 +441,19 @@ export async function handleKuaiziAssetAction(
                 if (items.length < 100 || all.length >= (d.TotalCount ?? 0)) break;
             }
             if (all.length >= 500) console.warn('[kuaizi-assets] ListAssetGroups Name 筛选触到 500 封顶');
-            const overlaid = await Promise.all(all.map((it) => nativeRow(it, 'group', userId)));
-            const filtered = overlaid.filter(
-                (g) => typeof g.Name === 'string' && (g.Name as string).includes(nameFilter),
+            const pairs = await Promise.all(
+                all.map(async (it) => ({ rawId: str(it.Id), row: await nativeRow(it, 'group', userId) })),
             );
+            const wanted = new Set(idFilter ?? []);
+            const filtered = pairs
+                .filter(({ rawId, row }) => {
+                    if (nameFilter && !(typeof row.Name === 'string' && (row.Name as string).includes(nameFilter)))
+                        return false;
+                    // GroupIds:火山组号(对客形)与上游号(存量客户手里的)都认 —— 与「宽进」一致
+                    if (wanted.size && !(wanted.has(str(row.Id) ?? '') || wanted.has(rawId ?? ''))) return false;
+                    return true;
+                })
+                .map(({ row }) => row);
             const start = (p.data.PageNumber - 1) * p.data.PageSize;
             return {
                 Items: filtered.slice(start, start + p.data.PageSize),
