@@ -1427,6 +1427,42 @@ model EnterpriseGlobalDiscount {
 }
 
 // ── 企业门户请求日志(2026-09-03)──
+// ── 企业运营后台 次级管理员 + 管理员操作审计(2026-09-04)──
+// 次级管理员 = enterprise_admins 有行的 User(与全局 UserRole 解耦 —— 不给 staff/admin
+// role,避免权限外溢到主站 /admin;superadmin 天然全权,不需要行)。
+// 守门/审计统一走 src/lib/enterprise/admin-auth.ts。
+model EnterpriseAdmin {
+  user_id    String   @id @db.Uuid
+  note       String? // 备注(是谁,哪个业务线)
+  created_at DateTime @default(now())
+  created_by String?  @db.Uuid // 授予人(superadmin)
+
+  @@map("enterprise_admins")
+}
+
+// 管理员操作审计:企业运营后台每个【成功的写操作】一行(入账/开户/改折扣/启停 key/
+// 设密码/删账号/授予撤销管理员…)。superadmin-only 查看(/enterprise-admin/audit)。
+// params 落库前脱敏(password/key/secret/token 字段值 → [redacted])+ 截断。
+// admin_email 冗余存一份:账号以后删了,日志还能读。永久保留(低量,不清理)。
+model AdminAuditLog {
+  id            String   @id @default(uuid()) @db.Uuid
+  created_at    DateTime @default(now())
+  admin_user_id String?  @db.Uuid // break-glass token 操作 → null
+  admin_email   String?
+  level         String // super | secondary | break_glass
+  action        String // credit / onboard / customer_update / key_status / …
+  method        String
+  path          String
+  target        String? // 目标客户 user_id / key id / email 等
+  params        String? // 脱敏 + 截断后的入参 JSON
+  client_ip     String?
+  user_agent    String?
+
+  @@index([created_at])
+  @@index([admin_user_id, created_at])
+  @@map("admin_audit_logs")
+}
+
 // 一条对客请求一行(submit 全量;poll 只记有信息量的:出错/状态迁移/终态,含没打到上游
 // 就被拒的 401/403/404/400;reconcile = 对账器补的终态动作)。admin-only:upstream_body
 // 含上游中间商域名(xinhankr/artsmcp),绝不接客户面(#271 红线)。
