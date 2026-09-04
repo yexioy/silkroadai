@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { unauthorizedResponse } from '@/lib/admin-auth';
-import { resolveAdmin } from '@/lib/admin/auth';
+import { resolveEnterpriseAdmin } from '@/lib/enterprise/admin-auth';
 import { buildReqlogWhere } from '@/lib/enterprise/request-log';
 import { toCsv, bjTimeStr } from '@/lib/enterprise/query';
 
@@ -17,7 +17,7 @@ const EXPORT_CAP = 50_000;
  * 守门:superadmin(session 或 break-glass token)。
  */
 export async function GET(request: NextRequest) {
-    const admin = await resolveAdmin(request, 'superadmin');
+    const admin = await resolveEnterpriseAdmin(request);
     if (!admin) return unauthorizedResponse(request);
 
     const sp = request.nextUrl.searchParams;
