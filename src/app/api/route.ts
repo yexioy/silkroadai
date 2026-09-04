@@ -267,7 +267,14 @@ async function handleAssetAction(req: NextRequest, ctx: RequestLogCtx): Promise<
             if (typeof rid === 'string' && rid) ctx.resourceId = rid;
             return ok(action, result);
         } catch (e) {
-            if (e instanceof RealPersonError) return fail(action, e.status, e.code, e.message);
+            if (e instanceof RealPersonError) {
+                // 上游侧原因落请求日志(2026-09-04):admin 日志详情页可直接看到上游为什么拒
+                if (e.upstream) {
+                    ctx.upstreamStatus = e.upstream.status ?? null;
+                    ctx.upstreamBody = e.upstream.body ?? null;
+                }
+                return fail(action, e.status, e.code, e.message);
+            }
             console.error('[asset-api] kuaizi asset error', action, e);
             return fail(action, 500, 'InternalError', 'internal error');
         }
@@ -502,7 +509,13 @@ async function handleAssetAction(req: NextRequest, ctx: RequestLogCtx): Promise<
                 return fail(action, 400, 'InvalidAction', `不支持的 Action: ${action}`);
         }
     } catch (e) {
-        if (e instanceof RealPersonError) return fail(action, e.status, e.code, e.message);
+        if (e instanceof RealPersonError) {
+            if (e.upstream) {
+                ctx.upstreamStatus = e.upstream.status ?? null;
+                ctx.upstreamBody = e.upstream.body ?? null;
+            }
+            return fail(action, e.status, e.code, e.message);
+        }
         if (e instanceof AssetError) return fail(action, e.status, e.code, e.message);
         console.error('[asset-api] internal error', action, e);
         return fail(action, 500, 'InternalError', 'internal error');

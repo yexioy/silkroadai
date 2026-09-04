@@ -40,6 +40,14 @@ vi.mock('@/lib/enterprise/volc-assets', async (importOriginal) => {
     const mod = await importOriginal<typeof import('@/lib/enterprise/volc-assets')>();
     return { ...mod, handleVolcAssetAction };
 });
+// 筷子库入口 mock(分流判据 shouldUseKuaiziAssets 等保留真实现):volc 路径的上游细节
+// 落日志测试用 —— 默认不触发(上面 enterpriseUpstreamKey 默认 null = 非 volc 客户)。
+const { handleKuaiziAssetAction } = vi.hoisted(() => ({ handleKuaiziAssetAction: vi.fn() }));
+vi.mock('@/lib/enterprise/kuaizi-assets', async (importOriginal) => {
+    const mod = await importOriginal<typeof import('@/lib/enterprise/kuaizi-assets')>();
+    return { ...mod, handleKuaiziAssetAction };
+});
+import { RealPersonError } from '@/lib/enterprise/real-person';
 
 import { POST } from '../route';
 
@@ -523,5 +531,52 @@ describe('请求日志落库(P2 2026-09-04)', () => {
         const res = await POST(req('CreateAssetGroup', { Name: 'g' }));
         expect(res.status).toBe(200);
         await flush();
+    });
+});
+
+describe('上游失败原因落请求日志(2026-09-04)', () => {
+    const flush = () => new Promise((r) => setTimeout(r, 0));
+    const reqlogRows = () =>
+        (db.enterpriseRequestLog.create.mock.calls as unknown as Array<[{ data: Record<string, unknown> }]>).map(
+            (c) => c[0].data,
+        );
+
+    it('筷子路径素材入库失败:上游原文进 upstream_body,对客响应【不】含上游原文(#271)', async () => {
+        db.enterpriseUpstreamKey.findUnique.mockResolvedValue({ id: 'up-volc' }); // volc 客户
+        handleKuaiziAssetAction.mockRejectedValue(
+            new RealPersonError(502, 'AssetCreateFailed', '素材入库失败,请检查素材链接后重试').withUpstream(
+                200,
+                '{"Status":"Failed","Reason":"download image failed: connect timeout kz-internal"}',
+            ),
+        );
+        const res = await POST(
+            req('CreateAsset', { GroupId: '1800657071180349888', URL: 'https://x/a.png', AssetType: 'image' }),
+        );
+        expect(res.status).toBe(502);
+        const bodyText = JSON.stringify(await res.json());
+        expect(bodyText).toContain('素材入库失败');
+        expect(bodyText).not.toContain('kz-internal'); // 上游原文只进日志,不对客
+        await flush();
+        const rows = reqlogRows();
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+            kind: 'asset_action',
+            action: 'CreateAsset',
+            format: 'kuaizi',
+            http_status: 502,
+            error_code: 'AssetCreateFailed',
+            upstream_status: 200,
+        });
+        expect(String(rows[0].upstream_body)).toContain('download image failed');
+    });
+
+    it('无 upstream 细节的失败照旧落行(upstream_* 空,不炸)', async () => {
+        db.enterpriseUpstreamKey.findUnique.mockResolvedValue({ id: 'up-volc' });
+        handleKuaiziAssetAction.mockRejectedValue(new RealPersonError(503, 'ServiceUnavailable', '未配置'));
+        const res = await POST(req('ListAssets', {}));
+        expect(res.status).toBe(503);
+        await flush();
+        const rows = reqlogRows();
+        expect(rows[0]).toMatchObject({ error_code: 'ServiceUnavailable', upstream_status: null, upstream_body: null });
     });
 });

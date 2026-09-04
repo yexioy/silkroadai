@@ -33,6 +33,10 @@
 import 'server-only';
 
 export class RealPersonError extends Error {
+    /** 上游侧往返细节(2026-09-04):请求日志 upstream_status/upstream_body 用。
+     *  只进 admin 面排障,绝不对客回显(#271 —— 可能含上游域名/身份)。 */
+    upstream?: { status?: number; body?: string };
+
     constructor(
         public status: number,
         public code: string,
@@ -40,6 +44,11 @@ export class RealPersonError extends Error {
     ) {
         super(message);
         this.name = 'RealPersonError';
+    }
+
+    withUpstream(status?: number, body?: string): this {
+        this.upstream = { status, body: body?.slice(0, 8 * 1024) };
+        return this;
     }
 }
 
