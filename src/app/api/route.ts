@@ -13,6 +13,7 @@ import {
 } from '@/lib/enterprise/assets';
 import { RealPersonError, createVisualValidateSession, getVisualValidateGroupId } from '@/lib/enterprise/real-person';
 import { handleKuaiziAssetAction, kuaiziAssetsEnabled, shouldUseKuaiziAssets } from '@/lib/enterprise/kuaizi-assets';
+import { decryptUpstreamKey } from '@/lib/enterprise/crypto';
 import {
     newRequestLogCtx,
     sanitizeRequestBody,
@@ -225,10 +226,21 @@ async function handleAssetAction(req: NextRequest, ctx: RequestLogCtx): Promise<
 
     // 「火山」渠道客户?= 已开通 volc(有 volc 上游 key 行)。AK/SK 是账号级(非按 region),
     // 故按"客户是否开通 volc"判定。volc 客户的真人认证 + 素材库都走 provider(专属服务)。
-    const isVolc = !!(await prisma.enterpriseUpstreamKey.findUnique({
+    // 客户 volc 行 + 自己的筷子 key(2026-09-04 起支持按客户;占位符行 → undefined 走平台 env key)。
+    const volcRow = await prisma.enterpriseUpstreamKey.findUnique({
         where: { user_id_region: { user_id: userId, region: 'volc' } },
-        select: { id: true },
-    }));
+        select: { id: true, upstream_key_enc: true },
+    });
+    const isVolc = !!volcRow;
+    let custKuaiziKey: string | undefined;
+    if (volcRow) {
+        try {
+            const k = decryptUpstreamKey(volcRow.upstream_key_enc);
+            if (k.startsWith('kz-')) custKuaiziKey = k;
+        } catch (e) {
+            console.warn('[asset-api] volc key decrypt failed, fallback env', { userId, err: String(e) });
+        }
+    }
 
     // 真人认证是「火山」渠道专属服务:未开通 volc → 403。
     if ((action === 'CreateVisualValidateSession' || action === 'GetVisualValidateResult') && !isVolc) {
@@ -262,7 +274,7 @@ async function handleAssetAction(req: NextRequest, ctx: RequestLogCtx): Promise<
     if (kuaiziAssetsEnabled() && isVolc && shouldUseKuaiziAssets(action, body)) {
         ctx.format = 'kuaizi'; // 素材落筷子自有库(volc 渠道缺省)
         try {
-            const result = await handleKuaiziAssetAction(action, body, userId);
+            const result = await handleKuaiziAssetAction(action, body, userId, custKuaiziKey);
             const rid = (result as { Id?: unknown } | null)?.Id;
             if (typeof rid === 'string' && rid) ctx.resourceId = rid;
             return ok(action, result);
@@ -492,7 +504,7 @@ async function handleAssetAction(req: NextRequest, ctx: RequestLogCtx): Promise<
                 // real-person 层用门户域名兜底。ProjectName 上游不支持,忽略。
                 const cb = z.object({ CallbackURL: z.string().trim().url().max(2000).optional() }).safeParse(body);
                 if (!cb.success) return zodFail(action, cb.error);
-                const s = await createVisualValidateSession(cb.data.CallbackURL);
+                const s = await createVisualValidateSession(cb.data.CallbackURL, custKuaiziKey);
                 return ok(action, {
                     BytedToken: s.bytedToken,
                     H5Link: s.h5Link,
@@ -502,7 +514,7 @@ async function handleAssetAction(req: NextRequest, ctx: RequestLogCtx): Promise<
             case 'GetVisualValidateResult': {
                 const p = z.object({ BytedToken: z.string().trim().min(1).max(200) }).safeParse(body);
                 if (!p.success) return fail(action, 400, 'InvalidParameter', 'BytedToken 必填');
-                const groupId = await getVisualValidateGroupId(p.data.BytedToken);
+                const groupId = await getVisualValidateGroupId(p.data.BytedToken, custKuaiziKey);
                 return ok(action, { GroupId: groupId });
             }
             default:

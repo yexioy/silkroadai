@@ -44,8 +44,8 @@ export function kuaiziAssetsEnabled(): boolean {
     return process.env.ENTERPRISE_KUAIZI_ASSETS !== '0';
 }
 
-function getConfig(): { base: string; key: string } {
-    const key = process.env.ENTERPRISE_KUAIZI_KEY;
+function getConfig(overrideKey?: string): { base: string; key: string } {
+    const key = overrideKey || process.env.ENTERPRISE_KUAIZI_KEY;
     if (!key) throw new RealPersonError(503, 'ServiceUnavailable', '火山渠道素材库未配置,请联系服务方');
     return { base: (process.env.ENTERPRISE_KUAIZI_BASE_URL || DEFAULT_BASE).replace(/\/$/, ''), key };
 }
@@ -112,8 +112,8 @@ function sanitizeUpstreamMessage(raw: string): string {
 }
 
 /** 调一个 Action。失败抛 RealPersonError(route 层统一映射成火山 Error 信封)。 */
-async function call<T>(action: string, body: Record<string, unknown>, clientId?: string): Promise<T> {
-    const { base, key } = getConfig();
+async function call<T>(action: string, body: Record<string, unknown>, clientId?: string, apiKey?: string): Promise<T> {
+    const { base, key } = getConfig(apiKey);
     let res: Response;
     try {
         res = await fetch(`${base}${ASSET_PATH}?Action=${encodeURIComponent(action)}&Version=${VERSION}`, {
@@ -326,11 +326,11 @@ function vendorWaitMs(): number {
     return Number.isFinite(raw) && raw > 0 ? raw : 60_000;
 }
 
-async function waitForVendorAssetId(upstreamId: string): Promise<string> {
+async function waitForVendorAssetId(upstreamId: string, apiKey?: string): Promise<string> {
     const deadline = Date.now() + vendorWaitMs();
     let last: UpstreamRow = {};
     for (;;) {
-        last = await call<UpstreamRow>('GetAsset', { Id: upstreamId });
+        last = await call<UpstreamRow>('GetAsset', { Id: upstreamId }, undefined, apiKey);
         const vendorId = str(last.VendorAssetId);
         if (vendorId) return vendorId;
         // 素材已终态却仍无火山号 = 上游那边根本没受理成功,再等也不会有。
@@ -364,7 +364,14 @@ async function waitForVendorAssetId(upstreamId: string): Promise<string> {
 }
 
 /** volc 素材库 Action 分发。返回火山 Result 对象(route 层包信封);失败抛 RealPersonError。 */
-export async function handleKuaiziAssetAction(action: string, body: unknown, userId?: string): Promise<unknown> {
+export async function handleKuaiziAssetAction(
+    action: string,
+    body: unknown,
+    userId?: string,
+    apiKey?: string,
+): Promise<unknown> {
+    // 客户自己的筷子 key(2026-09-04 起支持按客户);缺省平台 env key。
+    const kcall = <T>(a: string, b: Record<string, unknown>, cid?: string) => call<T>(a, b, cid, apiKey);
     switch (action) {
         case 'CreateAssetGroup': {
             const p = createGroupSchema.safeParse(body);
@@ -373,7 +380,7 @@ export async function handleKuaiziAssetAction(action: string, body: unknown, use
             // 允许重名 —— 上游只发【机器名】(永不重复),客户设的名字/描述存 volc_group_meta,
             // 读回来时覆盖。重名问题在结构上消失。
             const machineName = `g-${randomUUID().replace(/-/g, '').slice(0, 16)}`;
-            const d = await call<{ Id?: string; VendorGroupId?: string }>('CreateAssetGroup', {
+            const d = await kcall<{ Id?: string; VendorGroupId?: string }>('CreateAssetGroup', {
                 Name: machineName,
                 GroupType: p.data.GroupType,
             });
@@ -404,7 +411,7 @@ export async function handleKuaiziAssetAction(action: string, body: unknown, use
             const nameFilter = p.data.Filter?.Name;
             const upFilter = p.data.Filter?.GroupType ? { GroupType: p.data.Filter.GroupType } : undefined;
             if (!nameFilter) {
-                const d = await call<UpstreamPage<UpstreamRow>>('ListAssetGroups', {
+                const d = await kcall<UpstreamPage<UpstreamRow>>('ListAssetGroups', {
                     PageNumber: p.data.PageNumber,
                     PageSize: p.data.PageSize,
                     ...(upFilter ? { Filter: upFilter } : {}),
@@ -415,7 +422,7 @@ export async function handleKuaiziAssetAction(action: string, body: unknown, use
             // 改成拉全量(封顶 500)→ 覆盖名字 → 本地过滤(contains 语义)→ 本地分页。
             const all: UpstreamRow[] = [];
             for (let page = 1; page <= 5; page++) {
-                const d = await call<UpstreamPage<UpstreamRow>>('ListAssetGroups', {
+                const d = await kcall<UpstreamPage<UpstreamRow>>('ListAssetGroups', {
                     PageNumber: page,
                     PageSize: 100,
                     ...(upFilter ? { Filter: upFilter } : {}),
@@ -440,7 +447,7 @@ export async function handleKuaiziAssetAction(action: string, body: unknown, use
         case 'GetAssetGroup': {
             const p = idSchema.safeParse(body);
             if (!p.success) badParam(p.error);
-            const g = await call<UpstreamRow>('GetAssetGroup', { Id: await toUpstreamId(p.data.Id) }, p.data.Id);
+            const g = await kcall<UpstreamRow>('GetAssetGroup', { Id: await toUpstreamId(p.data.Id) }, p.data.Id);
             return nativeRow(g, 'group', userId);
         }
         case 'UpdateAssetGroup': {
@@ -449,7 +456,7 @@ export async function handleKuaiziAssetAction(action: string, body: unknown, use
             // 名字/描述归我们所有 —— 只写 volc_group_meta,不再 PUT 上游(上游那边是机器名,
             // 改它没有意义)。先 GetAssetGroup 做两件事:① 组不存在时如实 404;② 拿上游名
             // 当老组(无表行)首次改名时的回落名。
-            const cur = await call<UpstreamRow>('GetAssetGroup', { Id: await toUpstreamId(p.data.Id) }, p.data.Id);
+            const cur = await kcall<UpstreamRow>('GetAssetGroup', { Id: await toUpstreamId(p.data.Id) }, p.data.Id);
             await updateGroupMeta(
                 p.data.Id,
                 userId,
@@ -461,14 +468,14 @@ export async function handleKuaiziAssetAction(action: string, body: unknown, use
         case 'DeleteAssetGroup': {
             const p = idSchema.safeParse(body);
             if (!p.success) badParam(p.error);
-            await call('DeleteAssetGroup', { Id: await toUpstreamId(p.data.Id) }, p.data.Id);
+            await kcall('DeleteAssetGroup', { Id: await toUpstreamId(p.data.Id) }, p.data.Id);
             await deleteGroupMeta(p.data.Id);
             return {};
         }
         case 'CreateAsset': {
             const p = createAssetSchema.safeParse(body);
             if (!p.success) badParam(p.error);
-            const d = await call<{ Id?: string }>('CreateAsset', {
+            const d = await kcall<{ Id?: string }>('CreateAsset', {
                 GroupId: await toUpstreamId(p.data.GroupId),
                 URL: p.data.URL,
                 AssetType: p.data.AssetType,
@@ -481,7 +488,7 @@ export async function handleKuaiziAssetAction(action: string, body: unknown, use
                     JSON.stringify(d),
                 );
             // 压住等火山素材号(实测 ~7.5s);拿到才吐给客户 —— 见 waitForVendorAssetId。
-            const aVendor = await waitForVendorAssetId(aUp);
+            const aVendor = await waitForVendorAssetId(aUp, apiKey);
             await rememberVolcId(aVendor, aUp, 'asset', userId);
             return { Id: aVendor };
         }
@@ -495,7 +502,7 @@ export async function handleKuaiziAssetAction(action: string, body: unknown, use
                 ...(p.data.Filter?.Statuses ? { Statuses: p.data.Filter.Statuses } : {}),
                 ...(p.data.Filter?.Name ? { Name: p.data.Filter.Name } : {}),
             };
-            const d = await call<UpstreamPage<UpstreamRow>>('ListAssets', {
+            const d = await kcall<UpstreamPage<UpstreamRow>>('ListAssets', {
                 PageNumber: p.data.PageNumber,
                 PageSize: p.data.PageSize,
                 ...(Object.keys(filter).length ? { Filter: filter } : {}),
@@ -505,19 +512,19 @@ export async function handleKuaiziAssetAction(action: string, body: unknown, use
         case 'GetAsset': {
             const p = idSchema.safeParse(body);
             if (!p.success) badParam(p.error);
-            const a = await call<UpstreamRow>('GetAsset', { Id: await toUpstreamId(p.data.Id) }, p.data.Id);
+            const a = await kcall<UpstreamRow>('GetAsset', { Id: await toUpstreamId(p.data.Id) }, p.data.Id);
             return nativeRow(a, 'asset', userId);
         }
         case 'UpdateAsset': {
             const p = updateAssetSchema.safeParse(body);
             if (!p.success) badParam(p.error);
-            await call('UpdateAsset', { Id: await toUpstreamId(p.data.Id), Name: p.data.Name }, p.data.Id);
+            await kcall('UpdateAsset', { Id: await toUpstreamId(p.data.Id), Name: p.data.Name }, p.data.Id);
             return { Id: p.data.Id };
         }
         case 'DeleteAsset': {
             const p = idSchema.safeParse(body);
             if (!p.success) badParam(p.error);
-            await call('DeleteAsset', { Id: await toUpstreamId(p.data.Id) }, p.data.Id);
+            await kcall('DeleteAsset', { Id: await toUpstreamId(p.data.Id) }, p.data.Id);
             return {};
         }
         default:

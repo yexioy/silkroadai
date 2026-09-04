@@ -31,6 +31,7 @@ import {
     submitVolcVideo,
     pollVolcVideo,
     cancelVolcVideo,
+    customerKuaiziKey,
     volcRefLimits,
     VOLC_MODELS,
     VOLC_RESOLUTIONS,
@@ -727,7 +728,12 @@ async function handleSubmitInner(req: NextRequest, format: ClientFormat, ctx: Re
     const upstreamT0 = Date.now();
     const res =
         map.region === 'volc'
-            ? await submitVolcVideo(body, { clientModel: adapterModel, resolution: map.resolution, duration })
+            ? await submitVolcVideo(body, {
+                  clientModel: adapterModel,
+                  resolution: map.resolution,
+                  duration,
+                  upstreamKey: customerKuaiziKey(cust.upstreamKey),
+              })
             : await submitVideoWithKey({ ...body, model: adapterModel }, `Bearer ${cust.upstreamKey}`);
     const text = await res.text();
     ctx.upstreamMs = Date.now() - upstreamT0;
@@ -922,7 +928,7 @@ async function handlePollInner(
     const { result: upstream, cached } = await pollWithCache(taskId, async () => {
         const r =
             taskRegion === 'volc'
-                ? await pollVolcVideo(taskId)
+                ? await pollVolcVideo(taskId, customerKuaiziKey(cust.upstreamKey))
                 : await pollVideoWithKey(taskId, `Bearer ${upstreamKey}`, taskRegion);
         return { status: r.status, text: await r.text() };
     });

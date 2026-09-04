@@ -385,6 +385,16 @@ describe('火山原生 id / URL 归一(2026-08-19)+ id 判据收紧', () => {
         );
     });
 
+    it('apiKey 参数覆盖平台 env key(ApiKey 头用客户自己的 kz- key)', async () => {
+        const fetchMock = vi
+            .spyOn(global, 'fetch')
+            .mockResolvedValue(
+                new Response(envelope({ Id: '1', VendorGroupId: 'group-20260904000001-aaaa1' }), { status: 200 }),
+            );
+        await handleKuaiziAssetAction('CreateAssetGroup', { Name: 'g' }, undefined, 'kz-customer-own');
+        expect((fetchMock.mock.calls[0][1] as RequestInit).headers).toMatchObject({ ApiKey: 'kz-customer-own' });
+    });
+
     it('同名建组两次 → 都成功(火山官方允许重名;上游只见不重复的机器名)', async () => {
         let n = 0;
         vi.spyOn(global, 'fetch').mockImplementation(() => {

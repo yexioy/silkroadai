@@ -2,6 +2,7 @@
  *  方舟原生提交/轮询 + kz-cgt- ↔ cgt- id 伪装 + 成片直链优先级 + 未配置降级。 */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+    customerKuaiziKey,
     submitVolcVideo,
     pollVolcVideo,
     cancelVolcVideo,
@@ -241,6 +242,22 @@ describe('submitVolcVideo', () => {
         expect(body.error.message).toContain('安全审核');
         expect(JSON.stringify(body)).not.toContain('request_id');
         expect(JSON.stringify(body)).not.toContain('7f9a72b7');
+    });
+
+    // 2026-09-04:按客户筷子 key(上游把活体检测挪到新渠道,老渠道被关 —— 按客户切平滑过渡)
+    it('opts.upstreamKey 覆盖平台 env key(Bearer 头用客户自己的 kz- key)', async () => {
+        const fetchMock = mockSubmitThenVendor();
+        await submitVolcVideo({ prompt: 'x' }, opts({ upstreamKey: 'kz-customer-own' }));
+        for (const c of fetchMock.mock.calls) {
+            expect((c[1] as RequestInit).headers).toMatchObject({ Authorization: 'Bearer kz-customer-own' });
+        }
+    });
+
+    it('customerKuaiziKey:kz- 前缀才算客户真 key,占位符一律 undefined(回落 env)', () => {
+        expect(customerKuaiziKey('kz-real-key')).toBe('kz-real-key');
+        for (const v of ['platform-env-key', 'placeholder-volc', '', null, undefined]) {
+            expect(customerKuaiziKey(v)).toBeUndefined();
+        }
     });
 
     // ── 对客 id = 火山官方任务号(2026-08-19)──────────────────────────────────
