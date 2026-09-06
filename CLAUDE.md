@@ -219,6 +219,10 @@ silkroadai/
     - **部署方式**:只重建重启 3 个 `seedance-portal` 副本(改动全在 volc 分支,主站 portal + 6 个 API 副本未动);`.env` 备份 `.env.bak-kuaizi-upstream`,新增 `ENTERPRISE_KUAIZI_BASE_URL` + `ENTERPRISE_KUAIZI_KEY`;`ENTERPRISE_VOLC_VIDEO_*` 留着未删(代码已不读)。无 migration、无新依赖。
 - [ ] **待 operator 处理(部署时发现,均未擅自改)**:①**volc 实际有两个账号开通**(`liyan` 25 条任务 / `xzp` 1 条,都有 active volc key),与「单客户」前提不符 —— 素材库默认开后两家在筷子共享 ApiKey 账号里**互相可见**(实测已能看到筷子侧预存的 `user_621` 组)。要么收掉 xzp 的 volc key,要么置 `ENTERPRISE_KUAIZI_ASSETS=0`。②这两家 volc 行 `discount` 都是 **0.85**(#334 迁移写入),不是官方原价;改成 1 **是涨价需先通知客户**。
 
+### Seedream 5.0 Pro 生图线(2026-09-06)
+
+- [x] `seedream-5-0-pro` 适配器 ✅(2026-09-06,分支 `feat/seedream-5-pro-adapter`)— 上游 service-inference.ai `dola-seedream-5-0-pro-260628-ep`,走 image-adapter / minimax 同款「portal 适配器 + new-api 渠道」:`src/lib/seedream/adapter.ts` + `/seedream-adapter/v1/images/generations`。**渠道必须开 `pass_through_body_enabled`**(否则 new-api 按自家 ImageRequest 重组 body,`layer_decomposition` / `image` 等字段到不了适配器;echo 探测证实开了原始 JSON 逐字节到达、响应扩展字段 z_index / bounding_box 原样穿回)。适配器:模型名映射、输入图四字段归一(URL / base64 都直传上游)、恒要 b64_json(上游 url 是火山 TOS 24h 链接)、n 本层扇出(上游忽略 n)、**合成 usage = 售价 quota**(ModelRatio=CompletionRatio=1 ⇒ quota = input_tokens + output_tokens 逐 quota 精确)。售价 = 官方 USD × 0.55 × 6.8:普通 ≤2.36MP ¥0.1683 / >2.36MP ¥0.3366 每张,图层拆分 ¥0.0842 / ¥0.1683 每张输出,参考图第 2 张起 ¥0.0112(阈值取上游计费元数据 le_236w,不用官方页的 2.61M)。代理层(`/v1` route)钩子:缺省 `response_format=url` → b64 存图床(客户 OSS / R2)换永久 url;图层拆分空 prompt 占位空格(new-api 要求非空);multipart `images.edit` → 转 JSON 打 generations;上游无渠道按容量 503。上游实测:size 面积 ≤4,624,220 px(3K/4K 拒)、透明背景需恰好 1 张 PNG 输入、prompt 可空拆层。配置脚本 `scripts/setup-seedream-5-pro.mjs`(三键镜像 + ModelRatio/CompletionRatio=1 + 建渠道 pass_through/auto_ban=0);组 `seedream 5 pro` / 档位行已存在。**部署走 server2 `deploy-image-adapter.sh`(api-1..6),不是 CLAUDE.md 那条 portal 命令。** 旧 ch166(artsapi 直连、未定价)建议禁用。`/docs#seedream-image` 章节 + 23 适配器单测 + 6 代理单测。
+
 ---
 
 ## 关键架构决策(决策已定,不要重新讨论)

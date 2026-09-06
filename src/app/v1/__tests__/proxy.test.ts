@@ -4898,3 +4898,186 @@ describe('/v1 proxy — CORS(浏览器前端直调,对标 api.openai.com)', () =
         expect(res.headers.get('access-control-allow-origin')).toBe('*');
     });
 });
+
+// ── Seedream 5.0 Pro(seedream-5-0-pro,portal seedream-adapter 经 new-api)代理层钩子 ──
+describe('/v1 proxy — seedream-5-0-pro 钩子', () => {
+    const SD = 'seedream-5-0-pro';
+    function adapterResp(items: Array<Record<string, unknown>>, usage: Record<string, number> = {}) {
+        return new Response(
+            JSON.stringify({
+                created: 1,
+                model: SD,
+                data: items,
+                usage: {
+                    input_tokens: 0,
+                    output_tokens: 84150,
+                    total_tokens: 84150,
+                    input_images: 0,
+                    generated_images: items.length,
+                    ...usage,
+                },
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+    }
+    function forwarded(call = 0): { url: string; body: Record<string, unknown>; headers: Headers } {
+        const [url, init] = mockFetch.mock.calls[call] as [string, RequestInit];
+        return {
+            url,
+            body: JSON.parse(String(init.body)) as Record<string, unknown>,
+            headers: new Headers(init.headers as HeadersInit),
+        };
+    }
+
+    it('缺省 response_format = url:适配器 b64 → 存图床换 url,z_index 等扩展字段与 usage 原样,body 原样转发', async () => {
+        mockFetch.mockResolvedValueOnce(
+            adapterResp([{ b64_json: 'QUJD', size: '1024x1024', output_format: 'jpeg', z_index: 0 }]),
+        );
+        const res = await POST(
+            makeReq('/images/generations', {
+                body: { model: SD, prompt: 'x', size: '1K', watermark: false, image: ['https://a/b.png'] },
+            }),
+            ctx('images', 'generations'),
+        );
+        expect(res.status).toBe(200);
+        const j = (await res.json()) as {
+            data: Array<Record<string, unknown>>;
+            usage: Record<string, number>;
+            size: string;
+        };
+        expect(j.data[0].url).toMatch(
+            /^https:\/\/images\.silkroadai\.io\/gen\/\d{4}-\d{2}-\d{2}\/[0-9a-f-]+\.(png|jpg)$/,
+        );
+        expect(j.data[0].b64_json).toBeUndefined();
+        expect(j.data[0].z_index).toBe(0);
+        expect(j.data[0].output_format).toBe('jpeg');
+        expect(j.usage.output_tokens).toBe(84150);
+        expect(j.usage.generated_images).toBe(1);
+        expect(j.size).toBe('1024x1024');
+        expect(mockUploadImage).toHaveBeenCalledTimes(1);
+        const f = forwarded();
+        expect(f.url).toMatch(/\/v1\/images\/generations$/);
+        expect(f.headers.get('content-type')).toContain('application/json');
+        expect(f.body.model).toBe(SD);
+        expect(f.body.prompt).toBe('x');
+        expect(f.body.size).toBe('1K');
+        expect(f.body.watermark).toBe(false);
+        expect(f.body.image).toEqual(['https://a/b.png']);
+    });
+
+    it('response_format:b64_json → 内联 b64,不存图床', async () => {
+        mockFetch.mockResolvedValueOnce(adapterResp([{ b64_json: 'QUJD', size: '1024x1024' }]));
+        const res = await POST(
+            makeReq('/images/generations', { body: { model: SD, prompt: 'x', response_format: 'b64_json' } }),
+            ctx('images', 'generations'),
+        );
+        expect(res.status).toBe(200);
+        const j = (await res.json()) as { data: Array<Record<string, unknown>> };
+        expect(j.data[0].b64_json).toBe('QUJD');
+        expect(j.data[0].url).toBeUndefined();
+        expect(mockUploadImage).not.toHaveBeenCalled();
+    });
+
+    it('图层拆分 + 空 prompt → 转发 prompt 占位空格(new-api 要求非空);底图 + 图层各自存图床、bounding_box 保留', async () => {
+        mockFetch.mockResolvedValueOnce(
+            adapterResp(
+                [
+                    { b64_json: 'QUJD', size: '1024x1024', output_format: 'png', z_index: 0 },
+                    {
+                        b64_json: 'REVG',
+                        size: '692x743',
+                        output_format: 'png',
+                        z_index: 1,
+                        bounding_box: { absolute: [290, 311, 727, 780], normalized: [283, 304, 709, 761] },
+                        name: '红苹果',
+                        description: 'desc',
+                    },
+                ],
+                { output_tokens: 84150, total_tokens: 84150, input_images: 1, generated_images: 2 },
+            ),
+        );
+        const res = await POST(
+            makeReq('/images/generations', {
+                body: { model: SD, image: 'https://a/poster.png', layer_decomposition: true },
+            }),
+            ctx('images', 'generations'),
+        );
+        expect(res.status).toBe(200);
+        expect(forwarded().body.prompt).toBe(' ');
+        expect(forwarded().body.layer_decomposition).toBe(true);
+        const j = (await res.json()) as { data: Array<Record<string, unknown>> };
+        expect(j.data).toHaveLength(2);
+        expect(j.data[0].z_index).toBe(0);
+        expect(j.data[1].z_index).toBe(1);
+        expect(j.data[1].bounding_box).toEqual({ absolute: [290, 311, 727, 780], normalized: [283, 304, 709, 761] });
+        expect(j.data[1].name).toBe('红苹果');
+        expect(String(j.data[1].url)).toMatch(/^https:\/\/images\.silkroadai\.io\/gen\//);
+        expect(mockUploadImage).toHaveBeenCalledTimes(2);
+    });
+
+    it('multipart /images/edits(OpenAI SDK images.edit 形)→ 转 JSON 打 /images/generations:文件 → data URL,数字/布尔转型,mask 忽略', async () => {
+        mockFetch.mockResolvedValueOnce(adapterResp([{ b64_json: 'QUJD', size: '1024x1024' }]));
+        const form = new FormData();
+        form.append('model', SD);
+        form.append('prompt', 'x');
+        form.append('n', '2');
+        form.append('layer_decomposition', 'false');
+        form.append('watermark', 'true');
+        form.append('image', new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' }), 'a.png');
+        form.append('mask', new Blob([new Uint8Array([9])], { type: 'image/png' }), 'm.png');
+        form.append('image_urls', 'https://a/ref.png');
+        const req = new NextRequest('https://ai.silkroadai.io/v1/images/edits', { method: 'POST', body: form });
+        const res = await POST(req, ctx('images', 'edits'));
+        expect(res.status).toBe(200);
+        const f = forwarded();
+        expect(f.url).toMatch(/\/v1\/images\/generations$/);
+        expect(f.headers.get('content-type')).toContain('application/json');
+        expect(f.body.model).toBe(SD);
+        expect(f.body.prompt).toBe('x');
+        expect(f.body.n).toBe(2);
+        expect(f.body.layer_decomposition).toBe(false);
+        expect(f.body.watermark).toBe(true);
+        expect(f.body.image).toEqual(['data:image/png;base64,AQID', 'https://a/ref.png']);
+        expect(f.body).not.toHaveProperty('mask');
+        const j = (await res.json()) as { data: Array<Record<string, unknown>> };
+        expect(String(j.data[0].url)).toMatch(/^https:\/\/images\.silkroadai\.io\/gen\//); // 缺省 url → 存图床
+    });
+
+    it('上游「无渠道」→ 按容量 503,不判 model_not_found(我们认识这个模型)', async () => {
+        mockFetch.mockResolvedValueOnce(
+            new Response(JSON.stringify({ error: { message: `no available channel for model ${SD}` } }), {
+                status: 503,
+                headers: { 'content-type': 'application/json' },
+            }),
+        );
+        const res = await POST(
+            makeReq('/images/generations', { body: { model: SD, prompt: 'x' } }),
+            ctx('images', 'generations'),
+        );
+        expect(res.status).toBe(503);
+        const j = (await res.json()) as { error: { code?: string } };
+        expect(j.error.code).not.toBe('model_not_found');
+    });
+
+    it('适配器 4xx 参数错 → 原 status + 原文透传(不被归一吞掉)', async () => {
+        mockFetch.mockResolvedValueOnce(
+            new Response(
+                JSON.stringify({
+                    error: {
+                        message: 'layer_decomposition requires exactly one input image',
+                        type: 'invalid_request_error',
+                        param: 'image',
+                        code: 'invalid_value',
+                    },
+                }),
+                { status: 400, headers: { 'content-type': 'application/json' } },
+            ),
+        );
+        const res = await POST(
+            makeReq('/images/generations', { body: { model: SD, prompt: 'x', layer_decomposition: true } }),
+            ctx('images', 'generations'),
+        );
+        expect(res.status).toBe(400);
+        expect(await res.text()).toContain('exactly one input image');
+    });
+});

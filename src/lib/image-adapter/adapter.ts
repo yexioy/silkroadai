@@ -154,7 +154,7 @@ async function toJpegB64(b64: string): Promise<string> {
 }
 
 /** dep-free 尺寸解析(PNG IHDR / JPEG SOF),读不出 → null(输入 token 按 1MP 兜底)。 */
-function imageDimensions(buf: Buffer): { w: number; h: number } | null {
+export function imageDimensions(buf: Buffer): { w: number; h: number } | null {
     if (
         buf.length >= 24 &&
         buf[0] === 0x89 &&

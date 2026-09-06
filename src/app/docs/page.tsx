@@ -139,6 +139,11 @@ const AGENTS: AgentSection[] = [
         label: 'Batch API · 批量生图',
         blurb: 'OpenAI Batch API 兼容(/v1/files + /v1/batches):上传 JSONL → 创建批任务 → 轮询 → 下载结果文件;官方 SDK client.batches.* 直接可用,当前支持批量文生图 / 图生图。',
     },
+    {
+        id: 'seedream-image',
+        label: 'Seedream 5.0 Pro 生图 · 图层拆分',
+        blurb: '字节 Seedream 5.0 Pro — 文生 / 图生(≤10 参考图)/ 图层拆分(底图 + 透明 PNG 图层带坐标)/ 透明背景;OpenAI Images 兼容,按张计费 ¥0.17 起,需「seedream 5 pro」档 key。',
+    },
 ];
 
 const OPENAI_BASE = 'https://ai.silkroadai.io/v1';
@@ -4485,6 +4490,248 @@ curl "${OPENAI_BASE}/files/file-yyyy/content" \\
                             error_file_id
                         </code>{' '}
                         · 限 20MB / 1000 行 / 在途 5 批 / 24h 窗口 · 出图一律 URL · 按同步价计费。
+                    </div>
+                </section>
+                <section id="seedream-image" className="mt-12 mb-10 scroll-mt-20">
+                    <div className="flex items-baseline justify-between flex-wrap gap-2 mb-4 pb-3 border-b-2 border-brand-accent">
+                        <h2 className="m-0 text-2xl font-semibold text-navy">
+                            <span className="text-brand-accent font-bold mr-3 tabular-nums">23</span>
+                            Seedream 5.0 Pro 生图 · 图层拆分
+                        </h2>
+                    </div>
+                    <p className="m-0 mb-3 text-sm text-ink leading-relaxed">
+                        字节 <strong className="text-navy">Seedream 5.0 Pro</strong>(即梦 / 豆包图像旗舰)—— 文生图 /
+                        图生图(最多 10 张参考图)/ <strong className="text-navy">图层拆分</strong>
+                        (一张图拆成底图 + 若干透明 PNG 图层,每层带坐标与名称)/ 透明背景 / 联网检索。 OpenAI Images API
+                        兼容:{' '}
+                        <code className="font-mono text-xs bg-paper-muted px-1.5 py-0.5 rounded border border-brand-border text-navy">
+                            POST /v1/images/generations
+                        </code>
+                        ,model ={' '}
+                        <code className="font-mono text-xs bg-paper-muted px-1.5 py-0.5 rounded border border-brand-border text-navy">
+                            seedream-5-0-pro
+                        </code>
+                        。现有 OpenAI SDK 改一行 base_url 即可;图生图既可走 JSON 的{' '}
+                        <code className="font-mono text-xs">image</code> 字段,也可用 SDK 的{' '}
+                        <code className="font-mono text-xs">images.edit</code>(multipart)上传文件。
+                    </p>
+                    <div className="rounded-lg border border-brand-border bg-paper-muted px-4 py-3 mb-4 text-sm text-ink leading-relaxed">
+                        ⚠️ 需先在「API 密钥」页创建一把 <strong className="text-navy">「seedream 5 pro」档</strong> 的
+                        key(创建密钥时在档次里选它)。该 key 专用于{' '}
+                        <code className="font-mono text-xs">seedream-5-0-pro</code>;调别的模型请用对应档 key。
+                    </div>
+
+                    <p className="m-0 mb-2 text-sm font-medium text-navy">价格(按张,按返回图实际像素分档)</p>
+                    <div className="rounded-lg overflow-hidden border border-brand-border bg-surface mb-2">
+                        <table className="w-full border-collapse text-sm">
+                            <thead>
+                                <tr className="bg-paper-muted text-muted-ink">
+                                    <th className="text-left px-4 py-2.5 text-xs font-semibold border-b border-brand-border">
+                                        项目
+                                    </th>
+                                    <th className="text-left px-4 py-2.5 text-xs font-semibold border-b border-brand-border">
+                                        ≤ 236 万像素(1K / 1.5K)
+                                    </th>
+                                    <th className="text-left px-4 py-2.5 text-xs font-semibold border-b border-brand-border">
+                                        &gt; 236 万像素(2K)
+                                    </th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr className="border-b border-brand-border">
+                                    <td className="px-4 py-3 text-ink align-top">普通生图(文生 / 图生),每张</td>
+                                    <td className="px-4 py-3 text-navy font-medium align-top">¥0.1683</td>
+                                    <td className="px-4 py-3 text-navy font-medium align-top">¥0.3366</td>
+                                </tr>
+                                <tr className="border-b border-brand-border">
+                                    <td className="px-4 py-3 text-ink align-top">
+                                        图层拆分,每张输出(底图 + 每个图层各算 1 张)
+                                    </td>
+                                    <td className="px-4 py-3 text-navy font-medium align-top">¥0.0842</td>
+                                    <td className="px-4 py-3 text-navy font-medium align-top">¥0.1683</td>
+                                </tr>
+                                <tr>
+                                    <td className="px-4 py-3 text-ink align-top">输入参考图</td>
+                                    <td className="px-4 py-3 text-navy font-medium align-top" colSpan={2}>
+                                        第 1 张免费,第 2 张起每张 ¥0.0112
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <p className="m-0 mb-4 text-xs text-muted-ink leading-relaxed">
+                        <code className="font-mono">n</code> 张 = n 次扣费;生成失败不扣费。 响应{' '}
+                        <code className="font-mono">usage.total_tokens</code> 即本次扣费的计费单位(500,000 = ¥1),
+                        <code className="font-mono">input_tokens</code> 为参考图费用、
+                        <code className="font-mono">output_tokens</code> 为出图费用,可逐请求对账。
+                    </p>
+
+                    <p className="m-0 mb-2 text-sm font-medium text-navy">参数</p>
+                    <div className="rounded-lg overflow-hidden border border-brand-border bg-surface mb-4">
+                        <table className="w-full border-collapse text-sm">
+                            <thead>
+                                <tr className="bg-paper-muted text-muted-ink">
+                                    <th className="text-left px-4 py-2.5 text-xs font-semibold border-b border-brand-border">
+                                        参数
+                                    </th>
+                                    <th className="text-left px-4 py-2.5 text-xs font-semibold border-b border-brand-border">
+                                        说明
+                                    </th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {[
+                                    ['model', '固定 seedream-5-0-pro'],
+                                    ['prompt', '画面 / 编辑意图。图层拆分时可空(自动拆全部要素)'],
+                                    [
+                                        'image',
+                                        '参考图:字符串或数组,http(s) URL 或 base64 data URL,最多 10 张;也接受 image_urls / images 字段名',
+                                    ],
+                                    [
+                                        'size',
+                                        '1K / 1.5K / 2K,或 宽x高 像素(面积 ≤ 4,624,220 px,不支持 3K/4K);缺省 2K(2048×2048)。resolution 同义',
+                                    ],
+                                    ['n', '生成张数 1–10(图层拆分固定 1)'],
+                                    [
+                                        'response_format',
+                                        'url(默认)= 永久直链,存在我们图床或你在「存储设置」配置的 OSS;b64_json = 内联 Base64',
+                                    ],
+                                    [
+                                        'layer_decomposition',
+                                        'true = 图层拆分:必须且只能传 1 张参考图,返回底图(z_index 0)+ 最多 16 个透明 PNG 图层(z_index ≥ 1,带 bounding_box / name / description)。prompt 可用自然语言或 <bbox>x1 y1 x2 y2</bbox>(归一化 0–999)指定要拆的元素',
+                                    ],
+                                    [
+                                        'background',
+                                        'opaque(默认)/ transparent。透明背景须恰好 1 张 PNG 参考图 + output_format=png',
+                                    ],
+                                    ['output_format', 'jpeg(默认)/ png;拆出的图层固定为透明 PNG'],
+                                    ['watermark', '默认 false;true 时右下角加「AI生成」字样'],
+                                    [
+                                        'seed / guidance_scale / web_search',
+                                        '原样透传:随机种子 / 提示词遵循强度 / 联网检索',
+                                    ],
+                                ].map(([k, v]) => (
+                                    <tr key={k} className="border-b border-brand-border last:border-b-0">
+                                        <td className="px-4 py-2.5 align-top">
+                                            <code className="font-mono text-xs text-navy">{k}</code>
+                                        </td>
+                                        <td className="px-4 py-2.5 text-ink align-top">{v}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <p className="m-0 mb-2 text-sm font-medium text-navy">A. 文生图(一次 2 张,2K)</p>
+                    <div className="mb-4">
+                        <CodeBlock language="bash">{`curl https://ai.silkroadai.io/v1/images/generations \\
+  -H "Authorization: Bearer $SILKROAD_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "seedream-5-0-pro",
+    "prompt": "一只穿着红色唐装的小柴犬,坐在大门红灯笼下拜年,国潮插画风格,喜庆温馨",
+    "size": "2K",
+    "n": 2,
+    "response_format": "url"
+  }'`}</CodeBlock>
+                    </div>
+
+                    <p className="m-0 mb-2 text-sm font-medium text-navy">B. 图生图 / 多图参考(URL 或 base64 都行)</p>
+                    <div className="mb-4">
+                        <CodeBlock language="bash">{`curl https://ai.silkroadai.io/v1/images/generations \\
+  -H "Authorization: Bearer $SILKROAD_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "seedream-5-0-pro",
+    "prompt": "参考图一中柴犬的神态和图二的古风房屋背景,绘制一幅精美的贺年国画插图",
+    "image": [
+      "https://example.com/assets/dog.png",
+      "data:image/png;base64,iVBORw0KGgo..."
+    ],
+    "size": "1.5K"
+  }'`}</CodeBlock>
+                    </div>
+
+                    <p className="m-0 mb-2 text-sm font-medium text-navy">C. 图层拆分(layer_decomposition)</p>
+                    <div className="mb-2">
+                        <CodeBlock language="bash">{`curl https://ai.silkroadai.io/v1/images/generations \\
+  -H "Authorization: Bearer $SILKROAD_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "seedream-5-0-pro",
+    "prompt": "分离标题文字与主体鹦鹉为独立图层;鹦鹉坐标 <bbox>347 305 642 997</bbox>",
+    "image": "https://example.com/poster.png",
+    "layer_decomposition": true,
+    "size": "2K",
+    "output_format": "png"
+  }'`}</CodeBlock>
+                    </div>
+                    <p className="m-0 mb-4 text-xs text-muted-ink leading-relaxed">
+                        返回 <code className="font-mono">data[]</code> 按 <code className="font-mono">z_index</code>{' '}
+                        自底向上:0 为底图(被挡住的背景会补全),其余为图层;按 z_index 升序叠回即还原整图。
+                    </p>
+
+                    <p className="m-0 mb-2 text-sm font-medium text-navy">D. OpenAI SDK(Python)</p>
+                    <div className="mb-4">
+                        <CodeBlock language="python">{`from openai import OpenAI
+client = OpenAI(api_key="sk-...", base_url="https://ai.silkroadai.io/v1")
+
+# 文生图(extra_body 传 Seedream 特有参数)
+r = client.images.generate(
+    model="seedream-5-0-pro",
+    prompt="一只柴犬商品主图,纯白背景",
+    size="1K",
+    response_format="url",
+    extra_body={"watermark": False, "seed": 42},
+)
+print(r.data[0].url)
+
+# 图生图 / 透明背景:用 images.edit 上传文件(multipart 自动转成 image 字段)
+r = client.images.edit(
+    model="seedream-5-0-pro",
+    image=open("product.png", "rb"),
+    prompt="抠出主体,纯透明背景",
+    extra_body={"background": "transparent", "output_format": "png"},
+)
+print(r.data[0].url)`}</CodeBlock>
+                    </div>
+
+                    <p className="m-0 mb-2 text-sm font-medium text-navy">返回结果(图层拆分示例)</p>
+                    <div className="mb-4">
+                        <CodeBlock language="json">{`{
+  "created": 1788705888,
+  "model": "seedream-5-0-pro",
+  "data": [
+    { "url": "https://images.silkroadai.io/gen/2026-09-06/….png", "size": "2048x2048", "output_format": "png", "z_index": 0 },
+    {
+      "url": "https://images.silkroadai.io/gen/2026-09-06/….png",
+      "size": "1273x265", "output_format": "png", "z_index": 1,
+      "bounding_box": { "absolute": [383, 120, 1655, 384], "normalized": [187, 59, 808, 188] },
+      "name": "标题文字", "description": "黄色大号衬线标题"
+    }
+  ],
+  "usage": { "input_tokens": 0, "output_tokens": 168300, "total_tokens": 168300, "input_images": 1, "generated_images": 2 }
+}`}</CodeBlock>
+                    </div>
+
+                    <div className="rounded-lg border border-brand-border bg-paper-muted px-4 py-3 text-sm text-ink leading-relaxed space-y-1">
+                        <p className="m-0">
+                            <strong className="text-navy">耗时:</strong>单张 1K 约 20–40 s,2K / 图生图 40–100 s,图层拆分
+                            45–60 s;客户端超时请设 ≥ 180 s。
+                        </p>
+                        <p className="m-0">
+                            <strong className="text-navy">透明背景:</strong>参考图必须是 PNG(JPEG 会被拒),且只能传 1
+                            张;拆出的图层天然带 alpha。
+                        </p>
+                        <p className="m-0">
+                            <strong className="text-navy">常见错误:</strong>
+                            <code className="font-mono text-xs">400 invalid_value</code>(size 超面积 / 图层拆分传了 0
+                            或多张参考图 / 透明背景非 PNG)、
+                            <code className="font-mono text-xs">400 moderation_blocked</code>
+                            (提示词或图片触发内容安全)、
+                            <code className="font-mono text-xs">502 upstream_error</code>
+                            (上游临时不可用,重试即可,不扣费)。
+                        </p>
                     </div>
                 </section>
 
