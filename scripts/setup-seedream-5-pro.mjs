@@ -2,11 +2,16 @@
 /**
  * 配置 new-api 的「seedream 5 pro」线(Seedream 5.0 Pro · service-inference.ai,经 portal 适配器
  * /seedream-adapter,2026-09-06)。镜像 setup-seedance-cn-enterprise.mjs 的做法:
- *   1. GroupRatio                       : "seedream 5 pro" = 1(售价烤进适配器合成的 usage,组只做隔离/显示)
- *   2. group_ratio_setting.group_ratio  : 同上 —— 本台【强制】此结构化 key,缺了客户请求会 403
- *      「分组 X 已被弃用」。⚠️ 写这个 key 会对【所有】不在里面的组重新启用 enforcement(2026-06-30 事故),
- *      所以先把 GroupRatio 里的每个 key 镜像进去(已有值优先),再加本组。
- *   3. group_ratio_setting              : 嵌套形 {"group_ratio": {...}},与 #2 同一份 map(memory「三键同写」)。
+ *   1. GroupRatio                       : "seedream 5 pro" = 1(售价烤进适配器合成的 usage,组只做隔离/显示;
+ *      已是 1 则不 PUT —— 任何 option PUT 都会即时改内存态,能不动就不动)
+ *   2/3. group_ratio_setting(.group_ratio):**缺省不写**。2026-09-07 部署前核查:prod 三键早已分叉 ——
+ *      GroupRatio 15 键 / flat 18 键 / nested 17 键,9 个【在用】组(awsb 无f5 / awsb 稀缺 / pool-gpt-elon /
+ *      weirdo / 文本+生图 按量 / 静止蒸馏… / kimi / image 2 专属 / auto)三键都没有、全靠内存态放行,
+ *      且 default / pool-gpt / pool-claude 三组 GroupRatio 与 flat 的值不同。此时 PUT flat 会让所有不在
+ *      map 里的组立刻 403「已被弃用」(2026-06-30 事故),而合并两份值又是 operator 的定价决策 ——
+ *      所以本脚本只打印分叉报告;要写必须显式 `--sync-group-setting`(会把 GroupRatio ∪ flat ∪ nested
+ *      ∪【在用组=1】全镜像进去,flat 已有值优先),写完必须真打各组各一单看 log other.group_ratio。
+ *      seedream 5 pro 与其他 6 个「只在 GroupRatio」的组一样,目前靠内存态放行,已真机验证计费正确。
  *   4. UserUsableGroups                 : "seedream 5 pro" = "seedream 5 pro"(/keys 档位选择器显示名;已存在则不动)
  *   5. ModelRatio / CompletionRatio     : seedream-5-0-pro = 1 / 1 —— 适配器合成的 usage.input/output_tokens
  *      直接就是 quota(500k quota = ¥1),两个倍率必须都是 1,否则售价整体缩放。
@@ -94,18 +99,38 @@ async function putOption(key, value) {
 console.log(`=== setup-seedream-5-pro [${APPLY ? 'APPLY' : 'DRY-RUN'}] ===`);
 console.log(`adapter base_url: ${ADAPTER_BASE}\ngroup: ${GROUP}  model: ${MODEL}\n`);
 
-// 1-3: 分组三键(镜像 GroupRatio 全部 key,已有值优先,再加本组)
+// 1: GroupRatio(已是 1 则不动)
 const gr = parse(await getOption('GroupRatio'));
 const flat = parse(await getOption('group_ratio_setting.group_ratio'));
 const nested = parse(await getOption('group_ratio_setting'));
 const nestedMap = nested && typeof nested.group_ratio === 'object' && nested.group_ratio ? nested.group_ratio : {};
-const merged = { ...gr, ...nestedMap, ...flat, [GROUP]: gr[GROUP] ?? 1 };
-const missingFlat = Object.keys(merged).filter((k) => !(k in flat));
-console.log(`[GroupRatio] ${GROUP} => ${merged[GROUP]} (before: ${JSON.stringify(gr[GROUP] ?? null)})`);
-console.log(`[group_ratio_setting.group_ratio] 缺的组(将镜像进去): ${missingFlat.join(', ') || '(无)'}`);
-await putOption('GroupRatio', { ...gr, [GROUP]: merged[GROUP] });
-await putOption('group_ratio_setting.group_ratio', merged);
-await putOption('group_ratio_setting', { ...nested, group_ratio: merged });
+console.log(`[GroupRatio] ${GROUP} => 1 (before: ${JSON.stringify(gr[GROUP] ?? null)})`);
+if (gr[GROUP] !== 1) await putOption('GroupRatio', { ...gr, [GROUP]: 1 });
+
+// 2/3: 分叉报告(缺省只报告不写;见文件头)
+const onlyGr = Object.keys(gr).filter((k) => !(k in flat));
+const onlyFlat = Object.keys(flat).filter((k) => !(k in gr));
+const diffs = Object.keys(gr).filter((k) => k in flat && gr[k] !== flat[k]);
+console.log(`[group_ratio_setting.group_ratio] 只在 GroupRatio: ${onlyGr.join(', ') || '(无)'}`);
+console.log(`[group_ratio_setting.group_ratio] 只在 flat: ${onlyFlat.join(', ') || '(无)'}`);
+console.log(
+    `[group_ratio_setting.group_ratio] 值不同: ${diffs.map((k) => `${k} ${gr[k]}≠${flat[k]}`).join(', ') || '(无)'}`,
+);
+if (process.argv.includes('--sync-group-setting')) {
+    // 在用组(渠道 / token)从 channel 列表取;token 的组拿不到(admin API 无全量 token 列表)→ 用 UUG 兜底
+    const chList = (await api('GET', '/api/channel/?p=1&page_size=500')).j?.data;
+    const chItems = Array.isArray(chList) ? chList : (chList?.items ?? []);
+    const used = new Set();
+    for (const c of chItems) for (const g of String(c?.group || '').split(',')) if (g.trim()) used.add(g.trim());
+    for (const g of Object.keys(parse(await getOption('UserUsableGroups')))) used.add(g);
+    const merged = { ...gr, ...nestedMap, ...flat, [GROUP]: 1 };
+    for (const g of used) if (!(g in merged)) merged[g] = 1;
+    console.log(`[--sync-group-setting] 将写入 ${Object.keys(merged).length} 组:`, JSON.stringify(merged));
+    await putOption('group_ratio_setting.group_ratio', merged);
+    await putOption('group_ratio_setting', { ...nested, group_ratio: merged });
+} else {
+    console.log('[group_ratio_setting] 缺省不写(加 --sync-group-setting 才写,见文件头风险说明)');
+}
 
 // 4: UserUsableGroups(已有则不动)
 const uu = parse(await getOption('UserUsableGroups'));
@@ -216,16 +241,15 @@ if (APPLY) {
             : 'NOT FOUND',
     );
     const missing = Object.keys(gr2).filter((k) => !(k in flat2));
-    console.log('  GroupRatio 组未镜像进 flat 的:', missing.join(', ') || '(无)');
+    console.log('  GroupRatio 组未镜像进 flat 的(靠内存态放行):', missing.join(', ') || '(无)');
     const ok =
         gr2[GROUP] === 1 &&
-        flat2[GROUP] === 1 &&
+        (flat2[GROUP] === 1 || !process.argv.includes('--sync-group-setting')) &&
         !!uu2[GROUP] &&
         mr2[MODEL] === 1 &&
         cr2[MODEL] === 1 &&
         ch &&
         String(ch.group) === GROUP &&
-        chSetting.pass_through_body_enabled === true &&
-        missing.length === 0;
+        chSetting.pass_through_body_enabled === true;
     console.log(ok ? '\n✅ seedream 5 pro configured' : '\n❌ mismatch — check above');
 }
