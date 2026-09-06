@@ -88,6 +88,7 @@ import {
     handleSeedanceVideoPoll,
 } from '@/lib/seedance/cn-proxy';
 import { isKlingVideoModel, isKlingVideoTask, handleKlingVideoSubmit, handleKlingVideoPoll } from '@/lib/kling/proxy';
+import { isSeedreamModel } from '@/lib/seedream/adapter';
 import { isEnterpriseFlavor, handleEnterpriseV1 } from '@/lib/enterprise/proxy';
 import { guardSseResponse, guardSseStream, type SseErrorShape } from '@/lib/sse/stream-guard';
 import { forwardHeaders, passthroughResponse, STRIP_RESPONSE_HEADERS } from '@/lib/proxy/forward';
@@ -1184,6 +1185,40 @@ function formImageFiles(form: FormData): File[] {
     return files;
 }
 
+/** Seedream multipart(OpenAI SDK `images.edit` 形)→ JSON:文本字段原样(n / seed / guidance_scale 转数,
+ *  watermark / layer_decomposition / web_search 'true'/'false' 转布尔),文件(image / image[] / image[N],
+ *  mask 忽略)→ data URL 按序进 `image[]`;字符串形的 image / image_url(s) 视作 URL 一并收。
+ *  适配器只收 JSON /images/generations,图生图靠 image 字段(URL / base64 都吃)。 */
+async function seedreamFormToJson(form: FormData): Promise<JsonRecord> {
+    const body: JsonRecord = {};
+    const images: string[] = [];
+    const NUM = new Set(['n', 'seed', 'guidance_scale']);
+    const BOOL = new Set(['watermark', 'layer_decomposition', 'web_search']);
+    const IMG = new Set(['image', 'image[]', 'images', 'image_url', 'image_urls']);
+    for (const [k, v] of form.entries()) {
+        if (v instanceof File) {
+            if (k === 'mask' || v.size === 0) continue;
+            const buf = Buffer.from(await v.arrayBuffer());
+            if (buf.byteLength > IMAGE_FETCH_MAX_BYTES)
+                throw new ImageUrlError(`image too large: ${buf.byteLength} bytes (max ${IMAGE_FETCH_MAX_BYTES})`);
+            images.push(`data:${v.type || 'image/png'};base64,${buf.toString('base64')}`);
+            continue;
+        }
+        const s = String(v);
+        if (IMG.has(k) || /^image\[\d+\]$/.test(k)) {
+            if (s.trim()) images.push(s.trim());
+        } else if (NUM.has(k)) {
+            body[k] = Number(s);
+        } else if (BOOL.has(k)) {
+            body[k] = s.toLowerCase() === 'true';
+        } else {
+            body[k] = s;
+        }
+    }
+    if (images.length > 0) body.image = images;
+    return body;
+}
+
 /** gpt-image 统一分流:按【有无输入图】把请求路由到上游 /images/edits(有图,multipart)或
  *  /images/generations(无图,JSON),与客户调用的 path 无关 —— 文生图 / 图生图可发同一路径,
  *  代理据输入图分流,并按需在 JSON↔multipart 间转换(保留 n / quality / output_format 等透传字段)。
@@ -1640,7 +1675,14 @@ function buildEstimatedUsage(prompt: string, outSize: string): JsonRecord {
 
 /** 请求侧待回显的 images 顶层字段(OpenAI gpt-image 官方响应形:quality/background/output_format)。
  *  gptDefaults=true(gpt-image 系)时客户没传也按官方缺省补齐;否则只回显客户显式传的值。 */
-type ImageEchoFields = { quality: string; background: string; outputFormat: string; gptDefaults: boolean };
+type ImageEchoFields = {
+    quality: string;
+    background: string;
+    outputFormat: string;
+    gptDefaults: boolean;
+    /** true = 我们明确认识的非 gpt-image 模型(seedream 等):上游「无渠道」按容量 503,不判 model_not_found。 */
+    recognized?: boolean;
+};
 
 /** 非 Gemini 图片模型(gpt-image-2 等)透传 + 响应整形:
  *  - 上游报错(非 2xx)/ 非预期形态 → 透传 status+体(**绝不隐藏报错**,客户要求),
@@ -1718,7 +1760,7 @@ async function reshapeOpenAiImageResponse(
 
     // model 未被我们特殊处理(非 gpt-image)→ 上游报「无渠道」时判为未知 model(400 model_not_found)
     // 而非容量 503;gpt-image 模型的无渠道仍是容量 503(不误终态化真实的临时缺渠道)。
-    const unrecognizedModel = echo ? !echo.gptDefaults : false;
+    const unrecognizedModel = echo ? !(echo.gptDefaults || echo.recognized) : false;
 
     // 上游报错 / 形态非预期(非 JSON、无 data)→ 透传为主,例外见下。
     if (!upstream.ok || !data) {
@@ -1876,9 +1918,18 @@ async function handleImagesDalle(
     let wantHostedUrl = false;
     const inputParts: GeminiInputPart[] = [];
 
+    // Seedream multipart(OpenAI SDK images.edit 形)→ 先转 JSON(文件 → data URL),再走下面的 JSON 分支
+    // (seedream 适配器只收 JSON /images/generations;图生图靠 image 字段)。
+    let seedreamJson: JsonRecord | null = null;
+    let multipartForm: FormData | null = null;
     try {
         if (isMultipart) {
-            const form = await req.formData();
+            multipartForm = await req.formData();
+            if (isSeedreamModel(String(multipartForm.get('model') ?? '')))
+                seedreamJson = await seedreamFormToJson(multipartForm);
+        }
+        if (isMultipart && !seedreamJson) {
+            const form = multipartForm as FormData;
             model = String(form.get('model') ?? '');
             prompt = String(form.get('prompt') ?? '');
             responseFormat = String(form.get('response_format') ?? 'url') || 'url';
@@ -1998,7 +2049,7 @@ async function handleImagesDalle(
                     false,
                 );
         } else {
-            const body = (await req.json()) as JsonRecord;
+            const body = seedreamJson ?? ((await req.json()) as JsonRecord);
             model = String(body.model ?? '');
             prompt = String(body.prompt ?? '');
             responseFormat = String(body.response_format ?? 'url') || 'url';
@@ -2013,6 +2064,14 @@ async function handleImagesDalle(
                 let transcodeTo: 'jpeg' | null = null;
                 let transcodeCompression: number | undefined;
                 let wantStream = false;
+                const seedream = isSeedreamModel(model);
+                if (seedream) {
+                    // 缺省 = url(上游 / 火山默认;客户显式 b64_json 才内联)→ 适配器恒返 b64,回程存图床换 url。
+                    wantHostedUrl = responseFormat.toLowerCase() === 'url';
+                    // 图层拆分 prompt 可空(自动拆全部要素),但 new-api 要求 prompt 非空 → 占位一个空格,
+                    // 适配器 trim 后按空串交上游(2026-09-06 直连实测空 prompt 拆层正常)。
+                    if (body.layer_decomposition === true && !String(body.prompt ?? '').trim()) body.prompt = ' ';
+                }
                 if (isGptImageModel(model)) {
                     wantStream = body.stream === true || body.stream === 'true';
                     // 严格模式(opt-in):先按 Azure 标准校验 output_format/background/size,不合规 → 400
@@ -2045,20 +2104,21 @@ async function handleImagesDalle(
                     background: typeof body.background === 'string' ? body.background : '',
                     outputFormat: typeof body.output_format === 'string' ? body.output_format : '',
                     gptDefaults: isGptImageModel(model),
+                    recognized: seedream,
                 };
                 const run = async (): Promise<NextResponse> => {
                     try {
                         // 统一入口:gpt-image body 里带 image/image_url → 图生图 edits;否则文生图 generations。
                         const upstream = isGptImageModel(model)
                             ? await gptImageUpstreamWithSizeRetry(req, null, body, search)
-                            : await fetchUpstreamJson(req, body, path, search);
+                            : await fetchUpstreamJson(req, body, seedream ? '/images/generations' : path, search);
                         return await reshapeOpenAiImageResponse(
                             upstream,
                             prompt,
                             sizeRaw,
                             cap,
                             req,
-                            isGptImageModel(model) && wantHostedUrl,
+                            (isGptImageModel(model) || seedream) && wantHostedUrl,
                             transcodeTo,
                             echo,
                             transcodeCompression,

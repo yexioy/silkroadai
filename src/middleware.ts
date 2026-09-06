@@ -88,6 +88,6 @@ export const config = {
     // minimax-adapter/* 一并排除:MiniMax-H3 视频中继(2026-08-26),参考图 data URL base64
     // 可能 >10MB,同样避开 middleware body 缓冲截断。纯内部 API 中继,不需页面安全头。
     matcher: [
-        '/((?!v1/|v1beta/|seedance-adapter/|image-adapter/|minimax-adapter/|api/tools/|api/enterprise/assets|api/v3/|_next/static|_next/image|favicon.ico).*)',
+        '/((?!v1/|v1beta/|seedance-adapter/|image-adapter/|minimax-adapter/|seedream-adapter/|api/tools/|api/enterprise/assets|api/v3/|_next/static|_next/image|favicon.ico).*)',
     ],
 };
