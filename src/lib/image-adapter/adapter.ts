@@ -121,6 +121,38 @@ function imageHasAlpha(buf: Buffer): boolean | null {
     return null;
 }
 
+// ============ 响应合规(echo 官方枚举 + jpeg 转码)下沉到适配器层(2026-09-06)============
+// 客户官方兼容测试要求响应回显 quality/background/output_format 官方枚举、output_format=jpeg 真出
+// jpeg 字节。此前只在 portal /v1 reshape 层做,直连 :3000 绕过 portal 的客户(如 c-70fd7c5f)拿不到。
+// 适配器是【所有 image2 渠道公共必经点】+ new-api 透传适配器顶层字段(created/usage 实测原样传出)
+// → 在这里补 echo/transcode = portal 与直连客户都覆盖。portal reshape 同逻辑保留作双重(值相同,幂等)。
+
+/** 按返回图首字节魔数判 output_format(PNG/JPEG/WebP);读不出 → ''(退回请求侧)。 */
+function sniffOutputFormat(buf: Buffer): string {
+    if (buf.length >= 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'png';
+    if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpeg';
+    if (buf.length >= 12 && buf.toString('latin1', 0, 4) === 'RIFF' && buf.toString('latin1', 8, 12) === 'WEBP')
+        return 'webp';
+    return '';
+}
+
+/** png/webp base64 → jpeg base64(jimp,纯 JS 无 native 依赖;失败回退原图,永不抛)。
+ *  客户 output_format=jpeg 时上游多恒返 png → 服务端转码成真 jpeg 字节(客户 #9 反馈)。 */
+async function toJpegB64(b64: string): Promise<string> {
+    try {
+        const { Jimp } = await import('jimp');
+        const img = await Jimp.read(Buffer.from(b64, 'base64'));
+        const jpeg = await img.getBuffer('image/jpeg', { quality: 92 });
+        return Buffer.from(jpeg).toString('base64');
+    } catch (e) {
+        console.warn(
+            '[image-adapter] png→jpeg transcode failed, keeping original:',
+            e instanceof Error ? e.message : e,
+        );
+        return b64;
+    }
+}
+
 /** dep-free 尺寸解析(PNG IHDR / JPEG SOF),读不出 → null(输入 token 按 1MP 兜底)。 */
 function imageDimensions(buf: Buffer): { w: number; h: number } | null {
     if (
@@ -265,13 +297,17 @@ function classifyUpstreamError(status: number, text: string): TerminalReject | n
 function terminalReject(kind: 'safety' | 'bad_request'): NextResponse {
     console.warn('[image-adapter] terminal reject (no failover)', { kind });
     if (kind === 'safety') {
-        // 含 'content rejected' 标记 → 代理层 IMAGE_SAFETY_RE 命中 → 改写成统一 content_policy_violation
+        // 直接发【官方 gpt-image 现行审核形】moderation_blocked / user_error(2026-09-06 从旧
+        // content_policy_violation 对齐)—— 直连 :3000 绕过 portal 的客户也拿官方形。官方 message
+        // 含 "rejected as a result of our safety system" 仍命中 portal 的 IMAGE_SAFETY_RE → portal
+        // 再归一幂等(输出同一 moderation_blocked),portal 客户不受影响。
         return NextResponse.json(
             {
                 error: {
-                    message: 'content rejected: the image was flagged as unsafe by the content safety system',
-                    type: 'invalid_request_error',
-                    code: 'content_policy_violation',
+                    message:
+                        'Your request was rejected as a result of our safety system. Your request may contain content that is not allowed by our safety system.',
+                    type: 'user_error',
+                    code: 'moderation_blocked',
                 },
             },
             { status: 400 },
@@ -630,16 +666,30 @@ export async function handleAdapterImage(
         inputImageDims: parsed.images.map((img) => imageDimensions(img.buf)),
         imageCount: items.length,
     });
+    // ---- output_format=jpeg:服务端转码成真 jpeg 字节(客户 #9;dims/usage 已按原图算完,转码不改尺寸)----
+    const wantJpeg = (parsed.extras.output_format || '').trim().toLowerCase() === 'jpeg';
+    if (wantJpeg) {
+        for (const it of items) it.b64_json = await toJpegB64(it.b64_json);
+    }
+
     // ---- C2PA 剥离下沉到适配器层(2026-09-06)----
     // 候补 adobe(Firefly)出图内嵌 Adobe 私钥签名的 C2PA 会暴露真实上游。此前只在 portal /v1 reshape
     // 层剥,但 new-api :3000 公网可直连、客户绕过 portal 就拿到带 Adobe C2PA 的图(见 memory
     // ch83-adobe-c2pa-image-leak)。适配器是【所有 adobe 图片渠道的公共必经点】,在这里剥 = portal 与
     // 直连客户都覆盖,也不用追每家上游的身份变化(oaidist 曾 OpenAI 签名、2026-09-06 静默变 Adobe)。
     // 内容自定向:仅命中 adobe/firefly 标识的图才剥,OpenAI 原生/azure/gemini 出图字节原样(同一引用)。
-    // 放在 dims/alpha 读取与 usage 合成【之后】—— 剥离只删元数据块、不改像素与尺寸,计费不受影响。
+    // 放在 dims/alpha 读取与 usage 合成【之后】、jpeg 转码之后(转码 Jimp 重编码已丢元数据,strip 再兜底 png 路径)。
     for (const it of items) {
         it.b64_json = stripAdobeImageMetadataB64(it.b64_json);
     }
+
+    // ---- 响应回显官方枚举(客户 #13:quality/background/output_format;下沉覆盖直连客户)----
+    // quality:normQuality 已归一 low/medium/high(auto/standard→low)。output_format:按最终字节 sniff
+    // (交付真形态,消解"请求 jpeg 出 png 却回显 jpeg")。background:透明校验通过则 transparent,否则 opaque。
+    // size:计费尺寸(= 返回图实际尺寸)。上游没这些字段,new-api 透传适配器顶层字段 → 直连客户也收到。
+    const outFmt = sniffOutputFormat(Buffer.from(items[0]?.b64_json ?? '', 'base64')) || (wantJpeg ? 'jpeg' : 'png');
+    const outBackground = wantsTransparent ? 'transparent' : 'opaque';
+    const respSize = `${billW}x${billH}`;
     console.log('[image-adapter] ok', {
         provider: providerName,
         mode,
@@ -651,5 +701,13 @@ export async function handleAdapterImage(
         ct: usage.output_tokens,
         ms: Date.now() - started,
     });
-    return NextResponse.json({ created: Math.floor(Date.now() / 1000), data: items, usage });
+    return NextResponse.json({
+        created: Math.floor(Date.now() / 1000),
+        data: items,
+        usage,
+        size: respSize,
+        quality,
+        background: outBackground,
+        output_format: outFmt,
+    });
 }

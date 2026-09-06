@@ -556,7 +556,7 @@ describe('handleAdapterImage 失败路径(不合成 usage → new-api 不扣费)
         expect(text.toLowerCase()).not.toContain('omini');
     });
 
-    it('内容安全(451 image_unsafe)→ 终态 400 content_policy_violation(不 failover)', async () => {
+    it('内容安全(451 image_unsafe)→ 终态 400 官方 moderation_blocked(不 failover)', async () => {
         fetchMock.mockResolvedValue(
             new Response(JSON.stringify({ error: { error_code: 'image_unsafe', message: 'appear to be unsafe' } }), {
                 status: 451,
@@ -569,10 +569,11 @@ describe('handleAdapterImage 失败路径(不合成 usage → new-api 不扣费)
         );
         expect(res.status).toBe(400); // 终态,不是 503
         const body = await res.json();
-        expect(body.error.code).toBe('content_policy_violation');
+        // 直接发官方现行审核形(直连绕过客户也拿官方形);message 含 "safety system" → portal 再归一幂等
+        expect(body.error.code).toBe('moderation_blocked');
+        expect(body.error.type).toBe('user_error');
         expect(fetchMock).toHaveBeenCalledTimes(1); // 只打一次,没被重复扇出
-        // body 含 'content rejected' 标记(供代理 IMAGE_SAFETY_RE 命中),身份中性
-        expect(JSON.stringify(body).toLowerCase()).toContain('content rejected');
+        expect(JSON.stringify(body).toLowerCase()).toContain('safety system');
         expect(JSON.stringify(body).toLowerCase()).not.toContain('omini');
     });
 
@@ -1595,5 +1596,89 @@ describe('适配器层 C2PA 剥离(2026-09-06 下沉,堵 :3000 绕过客户的 a
         expect(res.status).toBe(200);
         const body = (await res.json()) as { data: Array<{ b64_json: string }> };
         expect(body.data[0].b64_json).toBe(clean); // 原样
+    });
+});
+
+describe('适配器响应合规下沉(echo 官方枚举 + jpeg 转码,覆盖直连绕过客户 2026-09-06)', () => {
+    const genW = (body: Record<string, unknown>) =>
+        handleAdapterImage(
+            jsonReq('http://portal.test/image-adapter/wetoken/v1/images/generations', {
+                model: 'gpt-image-2',
+                prompt: 'x',
+                size: '1024x1024',
+                ...body,
+            }),
+            'generations',
+            'wetoken',
+        );
+    // wetoken openAllTiers 放行所有档;上游返回真 PNG(pngB64 造)
+    const upstreamPng = (w = 1024, h = 1024) =>
+        fetchMock.mockImplementation(
+            async () =>
+                new Response(JSON.stringify({ created: 1, data: [{ b64_json: pngB64(w, h) }] }), {
+                    status: 200,
+                    headers: { 'content-type': 'application/json' },
+                }),
+        );
+
+    it('响应顶层回显 quality(归一 low)/ background(opaque)/ output_format(png,按字节)/ size', async () => {
+        upstreamPng(1024, 1024);
+        const res = await genW({ quality: 'auto' });
+        expect(res.status).toBe(200);
+        const b = (await res.json()) as Record<string, string>;
+        expect(b.quality).toBe('low'); // auto→low 官方枚举
+        expect(b.background).toBe('opaque');
+        expect(b.output_format).toBe('png'); // sniff pngB64 字节
+        expect(b.size).toBe('1024x1024');
+    });
+
+    it('quality=high 回显 high', async () => {
+        upstreamPng();
+        const res = await genW({ quality: 'high' });
+        expect(((await res.json()) as Record<string, string>).quality).toBe('high');
+    });
+
+    it('background=transparent(ominiapifull 支持透明)→ 回显 transparent', async () => {
+        // ominiapifull 无 noTransparentBackground,返回带 alpha 的图(colorType 6)过透明校验
+        fetchMock.mockImplementation(
+            async () =>
+                new Response(JSON.stringify({ created: 1, data: [{ b64_json: pngB64(1024, 1024, 6) }] }), {
+                    status: 200,
+                    headers: { 'content-type': 'application/json' },
+                }),
+        );
+        const res = await handleAdapterImage(
+            jsonReq('http://portal.test/image-adapter/ominiapifull/v1/images/generations', {
+                model: 'gpt-image-2',
+                prompt: 'x',
+                size: '1024x1024',
+                quality: 'low',
+                background: 'transparent',
+            }),
+            'generations',
+            'ominiapifull',
+        );
+        expect(res.status).toBe(200);
+        expect(((await res.json()) as Record<string, string>).background).toBe('transparent');
+    });
+
+    it('output_format=jpeg → 转码真 jpeg 字节 + 回显 jpeg', async () => {
+        // 造一张真 PNG(jimp 能解码),上游返回它
+        const { Jimp } = await import('jimp');
+        const png = Buffer.from(await new Jimp({ width: 8, height: 8, color: 0xff0000ff }).getBuffer('image/png'));
+        fetchMock.mockImplementation(
+            async () =>
+                new Response(JSON.stringify({ created: 1, data: [{ b64_json: png.toString('base64') }] }), {
+                    status: 200,
+                    headers: { 'content-type': 'application/json' },
+                }),
+        );
+        const res = await genW({ quality: 'low', output_format: 'jpeg' });
+        expect(res.status).toBe(200);
+        const b = (await res.json()) as { data: Array<{ b64_json: string }>; output_format: string };
+        const outBuf = Buffer.from(b.data[0].b64_json, 'base64');
+        expect(outBuf[0]).toBe(0xff); // JPEG SOI
+        expect(outBuf[1]).toBe(0xd8);
+        expect(b.output_format).toBe('jpeg');
     });
 });
