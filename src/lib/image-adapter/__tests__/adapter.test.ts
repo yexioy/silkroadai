@@ -1518,3 +1518,82 @@ describe('pandatk provider(Adobe Firefly 转售,openAllTiers 全量线)', () => 
         expect(lc).not.toContain('adobe');
     });
 });
+
+describe('适配器层 C2PA 剥离(2026-09-06 下沉,堵 :3000 绕过客户的 adobe 图泄漏)', () => {
+    // 带 adobe Firefly caBX(C2PA)的最小 PNG,colorType 6(RGBA)以过透明校验/尺寸解析
+    function adobePngB64(w = 1024, h = 1024): string {
+        const MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+        const chunk = (type: string, data: Buffer): Buffer => {
+            const len = Buffer.alloc(4);
+            len.writeUInt32BE(data.length, 0);
+            return Buffer.concat([len, Buffer.from(type, 'latin1'), data, Buffer.alloc(4)]);
+        };
+        const ihdr = Buffer.alloc(13);
+        ihdr.writeUInt32BE(w, 0);
+        ihdr.writeUInt32BE(h, 4);
+        ihdr[8] = 8; // bit depth
+        ihdr[9] = 6; // colorType RGBA
+        return Buffer.concat([
+            MAGIC,
+            chunk('IHDR', ihdr),
+            chunk('caBX', Buffer.from('jumbf c2pa claim_generator Adobe_Firefly ... Adobe Systems Incorporated')),
+            chunk('IDAT', Buffer.from('PIXELS-not-metadata')),
+            chunk('IEND', Buffer.alloc(0)),
+        ]).toString('base64');
+    }
+
+    it('上游返 adobe C2PA 图 → 适配器返回的 b64 已剥,像素无损', async () => {
+        const adobe = adobePngB64();
+        fetchMock.mockImplementation(
+            async () =>
+                new Response(JSON.stringify({ created: 1, data: [{ b64_json: adobe }] }), {
+                    status: 200,
+                    headers: { 'content-type': 'application/json' },
+                }),
+        );
+        // openAllTiers 上游(wetoken)放行方图 low,拿到出图
+        const res = await handleAdapterImage(
+            jsonReq('http://portal.test/image-adapter/wetoken/v1/images/generations', {
+                model: 'gpt-image-2',
+                prompt: 'x',
+                size: '1024x1024',
+                quality: 'low',
+            }),
+            'generations',
+            'wetoken',
+        );
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as { data: Array<{ b64_json: string }> };
+        const out = Buffer.from(body.data[0].b64_json, 'base64').toString('latin1').toLowerCase();
+        expect(out).not.toContain('adobe');
+        expect(out).not.toContain('firefly');
+        expect(out).not.toContain('cabx');
+        // 像素块保留(无损)
+        expect(Buffer.from(body.data[0].b64_json, 'base64').includes(Buffer.from('PIXELS-not-metadata'))).toBe(true);
+    });
+
+    it('OpenAI 原生/无 adobe 标识的图 → 字节原样不动(内容自定向,不误剥)', async () => {
+        // pngB64 造的最小 PNG 无 adobe 标识
+        const clean = pngB64(1024, 1024);
+        fetchMock.mockImplementation(
+            async () =>
+                new Response(JSON.stringify({ created: 1, data: [{ b64_json: clean }] }), {
+                    status: 200,
+                    headers: { 'content-type': 'application/json' },
+                }),
+        );
+        const res = await handleAdapterImage(
+            jsonReq('http://portal.test/image-adapter/wetoken/v1/images/generations', {
+                model: 'gpt-image-2',
+                prompt: 'x',
+                size: '1024x1024',
+                quality: 'low',
+            }),
+            'generations',
+            'wetoken',
+        );
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as { data: Array<{ b64_json: string }> };
+        expect(body.data[0].b64_json).toBe(clean); // 原样
+    });
+});
