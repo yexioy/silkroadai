@@ -20,6 +20,7 @@
  * 图片存储 / C2PA 脱敏不在这层做 —— 客户代理回程(/v1 route reshape)已做,这层只返 b64+usage。
  */
 import { NextRequest, NextResponse } from 'next/server';
+import { stripAdobeImageMetadataB64 } from '@/lib/proxy/image-metadata';
 import { IMAGE_PROVIDERS, type ImageProvider } from './providers';
 
 export type ImageMode = 'generations' | 'edits';
@@ -629,6 +630,16 @@ export async function handleAdapterImage(
         inputImageDims: parsed.images.map((img) => imageDimensions(img.buf)),
         imageCount: items.length,
     });
+    // ---- C2PA 剥离下沉到适配器层(2026-09-06)----
+    // 候补 adobe(Firefly)出图内嵌 Adobe 私钥签名的 C2PA 会暴露真实上游。此前只在 portal /v1 reshape
+    // 层剥,但 new-api :3000 公网可直连、客户绕过 portal 就拿到带 Adobe C2PA 的图(见 memory
+    // ch83-adobe-c2pa-image-leak)。适配器是【所有 adobe 图片渠道的公共必经点】,在这里剥 = portal 与
+    // 直连客户都覆盖,也不用追每家上游的身份变化(oaidist 曾 OpenAI 签名、2026-09-06 静默变 Adobe)。
+    // 内容自定向:仅命中 adobe/firefly 标识的图才剥,OpenAI 原生/azure/gemini 出图字节原样(同一引用)。
+    // 放在 dims/alpha 读取与 usage 合成【之后】—— 剥离只删元数据块、不改像素与尺寸,计费不受影响。
+    for (const it of items) {
+        it.b64_json = stripAdobeImageMetadataB64(it.b64_json);
+    }
     console.log('[image-adapter] ok', {
         provider: providerName,
         mode,
