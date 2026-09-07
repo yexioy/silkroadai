@@ -193,10 +193,7 @@ function resolveEnterpriseModel(
     if ((variant === 'promax-fast' || variant === 'promax-mini') && resRaw !== '720p') {
         return { error: errJson(400, 'invalid_request', `${rawModel} 仅支持 720p 档`) };
     }
-    // seedance 2.5(上游 artsdance-2-5-pro):仅 720p / 1080p(不支持 480p)
-    if (variant === '2.5' && resRaw !== '720p' && resRaw !== '1080p') {
-        return { error: errJson(400, 'invalid_request', `${rawModel} 仅支持 720p / 1080p 档`) };
-    }
+    // seedance 2.5(cn):480p / 720p / 1080p(480p 走原版 260628 上游,2026-09-07 开档;4k 由上方通用门拦)
     const hasRefs =
         extractImageUrls(body).length > 0 ||
         extractVideoUrls(body).length > 0 ||

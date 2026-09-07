@@ -194,9 +194,9 @@ print(j.get("video_url"), j.get("usage"))`}</Pre>
                                     <Code>seedance-2-5</Code>
                                 </Td>
                                 <Td>新代模型(国内版)</Td>
-                                <Td>720p / 1080p</Td>
-                                <Td>{listPrices('2.5', ['720p', '1080p'], false)}</Td>
-                                <Td>{listPrices('2.5', ['720p', '1080p'], true)}</Td>
+                                <Td>480p / 720p / 1080p</Td>
+                                <Td>{listPrices('2.5', ['480p', '720p', '1080p'], false)}</Td>
+                                <Td>{listPrices('2.5', ['480p', '720p', '1080p'], true)}</Td>
                             </tr>
                         </tbody>
                     </table>
@@ -213,7 +213,7 @@ print(j.get("video_url"), j.get("usage"))`}</Pre>
                     </li>
                     <li>
                         <b>480p 与 720p 同费率</b>(单价一样,但 token 量 ∝ 像素,480p 整条约为 720p 的一半价)。仅
-                        国内版(seedance-2-0 系)/ 火山渠道支持 480p;海外版(global)与 proMax 上游无 480p。
+                        国内版(seedance-2-0 系 / seedance-2-5)/ 火山渠道支持 480p;海外版(global)与 proMax 上游无 480p。
                     </li>
                     <li>「含视频输入」(参考视频)费率更低,但输入视频的时长也计入 token。图片参考不额外计 token。</li>
                     <li>生成失败不计费。提交时按预估价校验余额,不足返回 402(不会透支)。</li>
@@ -338,10 +338,7 @@ print(j.get("video_url"), j.get("usage"))`}</Pre>
                                 </Td>
                                 <Td>string</Td>
                                 <Td>否</Td>
-                                <Td>
-                                    480p / 720p(默认)/ 1080p / 4k(4k 仅 seedance-2-0;seedance-2-5 仅 720p / 1080p;480p
-                                    与 720p 同费率)
-                                </Td>
+                                <Td>480p / 720p(默认)/ 1080p / 4k(4k 仅 seedance-2-0;480p 与 720p 同费率)</Td>
                             </tr>
                             <tr>
                                 <Td>

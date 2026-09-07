@@ -374,9 +374,27 @@ describe('火山渠道(volc)路由', () => {
         );
     });
 
-    it('seedance-2-5 无 480p/4k(上游 artsdance-2-5-pro 不支持):传 480p → 400,不打上游', async () => {
+    it('seedance-2-5 480p(2026-09-07 开档,走原版 260628 上游):→ 长名 seedance2.5-480p', async () => {
+        submitVideoWithKey.mockResolvedValue(
+            NextResponse.json({ id: 'cgt-25c', task_id: 'cgt-25c', status: 'queued' }),
+        );
         const res = await handleEnterpriseV1(
             req('POST', '/v1/video/generations', { model: 'seedance-2-5', prompt: 'x', resolution: '480p' }),
+            '/video/generations',
+        );
+        expect(res.status).toBe(200);
+        expect(submitVideoWithKey).toHaveBeenCalledWith(
+            expect.objectContaining({ model: 'seedance2.5-480p' }),
+            expect.any(String),
+        );
+        expect(db.seedanceVideoTask.create).toHaveBeenCalledWith({
+            data: expect.objectContaining({ model: 'seedance-2-5', resolution: '480p' }),
+        });
+    });
+
+    it('seedance-2-5 无 4k:传 4k → 400,不打上游', async () => {
+        const res = await handleEnterpriseV1(
+            req('POST', '/v1/video/generations', { model: 'seedance-2-5', prompt: 'x', resolution: '4k' }),
             '/video/generations',
         );
         expect(res.status).toBe(400);
