@@ -984,7 +984,7 @@ describe('wetoken provider(us-la.we-token.cc,adobe 上游挂适配器 → 合成
 describe('oaidist provider(真 OpenAI 签名分销网关,gateMinCt 1,756 纯盈利档守门)', () => {
     const URL_OAIDIST = 'http://portal.test/image-adapter/oaidist/v1/images/generations';
 
-    it('路由到 64.32.31.178:3009,key 透传,model 强制 gpt-image-2 + 显式 b64_json', async () => {
+    it('路由到 llmway.ai,key 透传,model 强制 gpt-image-2 + 显式 b64_json', async () => {
         okUpstream();
         const res = await handleAdapterImage(
             jsonReq(URL_OAIDIST, { model: 'gpt-image-2', prompt: 'x', size: '1024x1024', quality: 'medium' }),
@@ -993,7 +993,7 @@ describe('oaidist provider(真 OpenAI 签名分销网关,gateMinCt 1,756 纯盈�
         );
         expect(res.status).toBe(200);
         const [url, init] = fetchMock.mock.calls[0];
-        expect(url).toBe('http://64.32.31.178:3009/v1/images/generations');
+        expect(url).toBe('https://llmway.ai/v1/images/generations');
         expect(init.headers.authorization).toBe('Bearer sk-upstream-test');
         const sent = JSON.parse(init.body as string);
         expect(sent.model).toBe('gpt-image-2');
@@ -1104,12 +1104,13 @@ describe('oaidist provider(真 OpenAI 签名分销网关,gateMinCt 1,756 纯盈�
         expect((await res.json()).usage.output_tokens).toBe(1756);
     });
 
-    it('brand 正则抹掉 distributor 与上游 IP', () => {
+    it('brand 正则抹掉 llmway / distributor / 旧上游 IP', () => {
         const out = sanitizeAdapterError(
-            'No available channel for model x under group default (distributor); upstream 64.32.31.178 refused',
-            /\bdistributor\b|64\.32\.31\.178/gi,
+            'llmway.ai gateway: No available channel under group default (distributor); upstream 64.32.31.178 refused',
+            /\bllmway\b|\bdistributor\b|64\.32\.31\.178/gi,
         );
         const lc = out.toLowerCase();
+        expect(lc).not.toContain('llmway');
         expect(lc).not.toContain('distributor');
         expect(lc).not.toContain('64.32.31.178');
     });
@@ -1118,7 +1119,7 @@ describe('oaidist provider(真 OpenAI 签名分销网关,gateMinCt 1,756 纯盈�
 describe('oaidistfull provider(oaidist 同上游同 key 的全量线,openAllTiers)', () => {
     const URL_FULL = 'http://portal.test/image-adapter/oaidistfull/v1/images/generations';
 
-    it('路由到同一上游 64.32.31.178:3009 + openAllTiers 放行方图 low(合成官方 196)', async () => {
+    it('路由到同一上游 llmway.ai + openAllTiers 放行方图 low(合成官方 196)', async () => {
         okUpstream();
         const res = await handleAdapterImage(
             jsonReq(URL_FULL, { model: 'gpt-image-2', prompt: 'x', size: '1024x1024', quality: 'low' }),
@@ -1128,7 +1129,7 @@ describe('oaidistfull provider(oaidist 同上游同 key 的全量线,openAllTier
         expect(res.status).toBe(200);
         expect((await res.json()).usage.output_tokens).toBe(196);
         const [url] = fetchMock.mock.calls[0];
-        expect(url).toBe('http://64.32.31.178:3009/v1/images/generations');
+        expect(url).toBe('https://llmway.ai/v1/images/generations');
     });
 
     it('size=auto → 透传上游,按返回图实际尺寸(1344x1008 low)合成官方 162', async () => {

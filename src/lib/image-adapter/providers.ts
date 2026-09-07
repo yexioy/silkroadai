@@ -128,28 +128,26 @@ export const IMAGE_PROVIDERS: Record<string, ImageProvider> = {
         openAllTiers: true,
         noTransparentBackground: true,
     },
-    // ---- 2026-08-24 operator 新接【真 OpenAI 签名】守门上游(new-api 型分销网关,IP 直连)----
-    // oaidist:出图带 OpenAI 原生 C2PA 证书链(签名证书 `OpenAI OpCo, LLC` + OpenAI TSA 时间戳链,
-    // 10/10 实测无 adobe/firefly 痕迹 → 回程剥离层不触发,签名【保留】= 客户可验官方凭证)。
-    // 上游只用它的 gpt-image-2(它还挂着 gemini/seedance 等,渠道 models 列表只配 gpt-image-2)。
-    // 守门:gateMinCt 1,756(¥0.06/张 成本保本线,operator 2026-08-24 拍板)= 1024² medium 起放行、
-    // 1280×1024 medium(1,510)及以下拒;纯盈利档,无狭长放行(见 gateMinCt 字段注释)。
-    // ⚠️ 该上游对约束外尺寸【不拒反而静默降级】(7000² 请求 200 返 2048² 实测)→ 计费必须按
-    // 返回图实际尺寸合成(adapter.ts 已改为全 provider 按实际尺寸,防超收)。
-    // 错误体是 new-api 通用形("new_api_error"/"(distributor)"),无独特品牌,brand 兜 IP + 该词。
-    // 透明背景:信任支持(真 OpenAI 原生参数)—— 2026-08-26 想实测但其 gpt-image-2 号池整个不可用
-    // (model_not_found),恢复后用 probe-transparent.py 补一发确认。
+    // ---- oaidist/oaidistfull(ch201/ch202)守门 + 全量线 ----
+    // 【上游变迁史】2026-08-24 首接 64.32.31.178:3009 是真 OpenAI 签名;2026-09-06 复测该上游【静默
+    // 变成 Adobe Firefly】(见 memory image2 project + ch83-adobe-c2pa-image-leak,上游会偷偷换后端)。
+    // 2026-09-07 operator 换上游到 llmway.ai(新 key,渠道 key 字段更新):实测真 OpenAI 签名(OpenAI
+    // OpCo 证书链,无 adobe)、quality 三档真分档(low/medium/high 画质递增,high 质量本批最佳)、
+    // 尺寸如实、速度最快(23-29s)。slug 名保留 oaidist/oaidistfull(渠道 base_url 路径不变),只换 baseUrl+key。
+    // C2PA 由适配器层统一按内容剥(#440)—— 上游身份再漂移也不漏,故不追签名变化。
+    // 守门:gateMinCt 1,756(¥0.06/张 保本线)= 1024² medium 起放行、1280×1024 medium(1,510)及以下拒。
+    // 计费按【返回图实际尺寸】合成(adapter.ts 全 provider 通用,防上游静默降级超收)。brand 兜 llmway +
+    // 通用 distributor 词(+ 旧 IP,历史兜底无害)。
     oaidist: {
-        baseUrl: 'http://64.32.31.178:3009',
-        brand: /\bdistributor\b|64\.32\.31\.178/gi,
+        baseUrl: 'https://llmway.ai',
+        brand: /\bllmway\b|\bdistributor\b|64\.32\.31\.178/gi,
         gateMinCt: 1_756,
     },
     // oaidistfull:oaidist 同一上游、同一 key 的【全量】线(镜像 wetokengated/wetoken 双线玩法):
     // openAllTiers 放行所有档位含 size=auto,合成官方 usage 兜住被守门线拒下来的低档/auto 流量。
-    // 上游对约束外尺寸静默降级的坑由"按返回图实际尺寸计费"(#403)兜底,auto 同样按实际尺寸。
     oaidistfull: {
-        baseUrl: 'http://64.32.31.178:3009',
-        brand: /\bdistributor\b|64\.32\.31\.178/gi,
+        baseUrl: 'https://llmway.ai',
+        brand: /\bllmway\b|\bdistributor\b|64\.32\.31\.178/gi,
         openAllTiers: true,
     },
 };
