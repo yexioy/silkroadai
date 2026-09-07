@@ -209,7 +209,8 @@ print(j.get("video_url"), j.get("usage"))`}</Pre>
                     </li>
                     <li>
                         参考:720p 5 秒 ≈ 108,872 token → 按官方价 seedance-2-0 约 ¥5.01、fast 约 ¥4.03、mini 约
-                        ¥2.50(折后按您的折扣率,如 8.5 折则分别约 ¥4.26 / ¥3.42 / ¥2.13);1080p ≈ 720p 的 2.25 倍 token。
+                        ¥2.50、seedance-2-5 约 ¥7.62(折后按您的折扣率,如 8.5 折则分别约 ¥4.26 / ¥3.42 / ¥2.13 /
+                        ¥6.48);1080p ≈ 720p 的 2.25 倍 token,480p ≈ 720p 的一半。
                     </li>
                     <li>
                         <b>480p 与 720p 同费率</b>(单价一样,但 token 量 ∝ 像素,480p 整条约为 720p 的一半价)。仅
@@ -346,7 +347,10 @@ print(j.get("video_url"), j.get("usage"))`}</Pre>
                                 </Td>
                                 <Td>int</Td>
                                 <Td>否</Td>
-                                <Td>4-15 任意整数秒,默认 5</Td>
+                                <Td>
+                                    任意整数秒,默认 5:2.0 系 4-15,seedance-2-5 系 4-30;-1 =
+                                    智能时长(模型在有效区间内自选)
+                                </Td>
                             </tr>
                             <tr>
                                 <Td>
@@ -792,8 +796,9 @@ print(j.get("video_url"), j.get("usage"))`}</Pre>
                     <div>
                         <p className="font-medium text-gray-900">Q:一条 5 秒 720p 视频多少钱?</p>
                         <p>
-                            720p 5s ≈ 108,872 token:seedance-2-0 约 ¥4.26,fast 约 ¥3.42,mini 约 ¥2.13。10 秒约为 2
-                            倍;1080p 约为 720p 的 2.25 倍 token。精确金额以完成后的「调用日志」为准。
+                            720p 5s ≈ 108,872 token:seedance-2-0 约 ¥4.26,fast 约 ¥3.42,mini 约 ¥2.13,seedance-2-5 约
+                            ¥6.48(8.5 折示例,实际按您的折扣率)。10 秒约为 2 倍;1080p 约为 720p 的 2.25 倍 token,480p
+                            约为一半。精确金额以完成后的「调用日志」为准。
                         </p>
                     </div>
                     <div>
@@ -807,8 +812,9 @@ print(j.get("video_url"), j.get("usage"))`}</Pre>
                     <div>
                         <p className="font-medium text-gray-900">Q:HTTPS 证书报错?</p>
                         <p>
-                            当前入口为独立 IP,HTTPS 使用自签证书:curl 加 <Code>-k</Code>,Python requests 加{' '}
-                            <Code>verify=False</Code>;或直接使用 HTTP(服务器对服务器场景)。
+                            请改用主域名(受信 HTTPS,无需任何特殊配置)。裸 IP 兼容入口的 HTTPS 是自签证书:curl 加{' '}
+                            <Code>-k</Code>,Python requests 加 <Code>verify=False</Code>;或直接使用
+                            HTTP(服务器对服务器场景)。
                         </p>
                     </div>
                     <div>
