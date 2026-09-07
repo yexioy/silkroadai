@@ -141,9 +141,33 @@ const SUBJECT_CN: Record<string, string> = {
     output: '生成结果',
 };
 
-/** 细节后缀:有脱敏后原文就带上(客户据此自查),没有就空。 */
-function detail(s: string): string {
-    return s ? `(上游原因:${s})` : '';
+/**
+ * 剥掉【中间层自己的包装】,只留火山风格的原文(2026-09-05 客户反馈:
+ * 「参考图未通过内容安全审核 —— 请修改参考图后重试(上游原因:资源同步失败: url= :
+ *  The request failed because the input image may contain sensitive information)」
+ * 封装味太重 —— 三层壳:我们的中文前缀、「上游原因」四个字、中间层的「资源同步失败:
+ * url= :」前缀。原生做法:把壳全剥掉,直出火山那句原文,就像火山自己返回的一样)。
+ */
+function stripVendorWrapping(s: string): string {
+    return s
+        .replace(/rpc error:.*?desc\s*=\s*/gi, '')
+        .replace(/(资源同步失败|素材转换失败|素材处理失败|下载资源失败)[:：]?\s*/g, '')
+        .replace(/create [\w ]+ failed[:：]\s*/gi, '')
+        .replace(/\burl\s*=\s*[:：]?\s*/gi, '')
+        .replace(/^[\s:：,，.。;;-]+/, '')
+        .replace(/[\s:：,，;;-]+$/, '')
+        .trim();
+}
+
+/**
+ * 对客文案 = 【火山风格原文优先】,拿不到才用我们的中文兜底。
+ * 不再有「上游原因:」这种自曝中间层的括号后缀(detail() 已删,2026-09-05)。
+ */
+function nativeOr(clean: string, fallback: string): string {
+    // HTML 错误页(nginx 502 等)不是给人看的文案 —— 当作没有原文,走中文兜底。
+    if (/<\s*(!doctype|html|head|body|title)\b/i.test(clean) || clean.trimStart().startsWith('<')) return fallback;
+    const native = stripVendorWrapping(clean);
+    return native || fallback;
 }
 
 /**
@@ -165,20 +189,24 @@ export function classifyUpstreamError(body: string, status?: number): UpstreamEr
         const who = subjectCn || '输入内容';
         return {
             category: 'copyright',
-            message:
+            message: nativeOr(
+                clean,
                 subject === 'output'
-                    ? `生成结果因版权/肖像限制被上游拦截 —— 请调整提示词或更换参考素材后重试${detail(clean)}`
-                    : `${who}疑似涉及版权/肖像限制,被上游审核拒绝 —— 请更换${who}或调整提示词后重试${detail(clean)}`,
+                    ? '生成结果因版权/肖像限制被拦截 —— 请调整提示词或更换参考素材后重试'
+                    : `${who}疑似涉及版权/肖像限制被审核拒绝 —— 请更换${who}或调整提示词后重试`,
+            ),
         };
     }
     if (/sensitive|敏感|安全审核|risk\s*control|violat|不合规|违规/.test(lower)) {
         const who = subjectCn || '输入内容';
         return {
             category: 'content_safety',
-            message:
+            message: nativeOr(
+                clean,
                 subject === 'output'
-                    ? `生成结果未通过内容安全审核 —— 请调整提示词或更换参考素材后重试${detail(clean)}`
-                    : `${who}未通过内容安全审核 —— 请修改${who}后重试${detail(clean)}`,
+                    ? '生成结果未通过内容安全审核 —— 请调整提示词或更换参考素材后重试'
+                    : `${who}未通过内容安全审核 —— 请修改${who}后重试`,
+            ),
         };
     }
 
@@ -188,7 +216,10 @@ export function classifyUpstreamError(body: string, status?: number): UpstreamEr
     if (/tasktypeconstraint|identified your task as/.test(lower)) {
         return {
             category: 'task_type_constraint',
-            message: `模型按提示词判定本次为「视频编辑 / 视频延长」任务 —— 该类型要求 ratio 必须为 adaptive(视频编辑还需 duration=-1)。请调整参数后重新提交${detail(clean)}`,
+            message: nativeOr(
+                clean,
+                '模型按提示词判定本次为「视频编辑 / 视频延长」任务 —— 该类型要求 ratio 必须为 adaptive(视频编辑还需 duration=-1),请调整参数后重新提交',
+            ),
         };
     }
     // ── 素材不存在(必须【先于】任务态判)────────────────────────────────────────
@@ -200,7 +231,10 @@ export function classifyUpstreamError(body: string, status?: number): UpstreamEr
         const id = clean.match(/asset[-\w]*[\s]+([A-Za-z0-9_-]+)[\s]+is not found/i)?.[1];
         return {
             category: 'invalid_parameter',
-            message: `引用的素材不存在或不可用${id ? `(${id})` : ''} —— 请确认素材已创建且 Status=Active,再用返回的素材 Id 引用`,
+            message: nativeOr(
+                clean,
+                `引用的素材不存在或不可用${id ? `(${id})` : ''} —— 请确认素材已创建且 Status=Active`,
+            ),
         };
     }
 
@@ -215,7 +249,7 @@ export function classifyUpstreamError(body: string, status?: number): UpstreamEr
     if (/failed to download media|下载失败|素材|media.*(unreachable|timeout)|gateway time-?out/.test(lower)) {
         return {
             category: 'media_fetch',
-            message: `输入素材下载失败(链接不可达或超时)—— 请确认图片/视频链接公网可访问;海外档拉国内链接易超时,可改用国内版${detail(clean)}`,
+            message: nativeOr(clean, '输入素材下载失败(链接不可达或超时)—— 请确认图片/视频链接公网可访问'),
         };
     }
 
@@ -223,17 +257,17 @@ export function classifyUpstreamError(body: string, status?: number): UpstreamEr
     if (/分辨率|resolution/.test(lower)) {
         return {
             category: 'resolution',
-            message: `所选分辨率不被当前模型档位接受 —— 请改用该档位支持的分辨率${detail(clean)}`,
+            message: nativeOr(clean, '所选分辨率不被当前模型档位接受 —— 请改用该档位支持的分辨率'),
         };
     }
     if (/duration|时长/.test(lower)) {
         return {
             category: 'duration',
-            message: `时长参数不被当前模型/参考模式接受(带参考图与纯文生的可选时长可能不同)—— 请调整 duration 后重试${detail(clean)}`,
+            message: nativeOr(clean, '时长参数不被当前模型/参考模式接受 —— 请调整 duration 后重试'),
         };
     }
     if (/invalid\s*parameter|invalidparameter|参数|invalid|bad\s*request/.test(lower)) {
-        return { category: 'invalid_parameter', message: `请求参数被上游拒绝${detail(clean) || ',请检查请求参数'}` };
+        return { category: 'invalid_parameter', message: nativeOr(clean, '请求参数无效,请检查后重试') };
     }
 
     // ── 限流 / 上游账户 / 上游故障 ──
@@ -245,7 +279,7 @@ export function classifyUpstreamError(body: string, status?: number): UpstreamEr
         return { category: 'upstream_account', message: '服务方上游账户异常,已通知处理 —— 请稍后重试或联系服务方' };
     }
     if (status && status >= 500) {
-        return { category: 'upstream_unavailable', message: `上游暂时不可用,请稍后重试${detail(clean)}` };
+        return { category: 'upstream_unavailable', message: nativeOr(clean, '生成服务暂时不可用,请稍后重试') };
     }
 
     // ── 兜底:也要说人话 ──
@@ -253,10 +287,10 @@ export function classifyUpstreamError(body: string, status?: number): UpstreamEr
     if (!clean) {
         return {
             category: 'unknown',
-            message: `上游拒绝了本次请求但未返回具体原因${status ? `(HTTP ${status})` : ''} —— 请稍后重试;若持续失败请联系服务方并提供请求时间`,
+            message: `请求被拒绝但未返回具体原因${status ? `(HTTP ${status})` : ''} —— 请稍后重试;若持续失败请联系服务方并提供请求时间`,
         };
     }
-    return { category: 'unknown', message: `上游拒绝了本次请求 —— ${clean}` };
+    return { category: 'unknown', message: nativeOr(clean, '请求被拒绝,请稍后重试') };
 }
 
 /**
