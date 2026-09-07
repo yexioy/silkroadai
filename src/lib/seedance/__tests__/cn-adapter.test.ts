@@ -488,7 +488,7 @@ describe('seedance 2.5 判定(2026-08-07,国内版新代)', () => {
         expect(regionForModel('seedance-2-5')).toBe('cn');
     });
 
-    it('MODEL_MAP:仅 720p/1080p × {无ref,-ref} 四档,上游 = artsdance-2-5-pro-260801,region 缺省 cn', async () => {
+    it('MODEL_MAP:480p/720p/1080p × {无ref,-ref} 六档;720p+ 走 pro 版、480p 走原版 260628,region 缺省 cn', async () => {
         const { MODEL_MAP } = await import('../cn-adapter');
         for (const name of ['seedance2.5-720p', 'seedance2.5-720p-ref', 'seedance2.5-1080p', 'seedance2.5-1080p-ref']) {
             expect(MODEL_MAP[name]).toBeTruthy();
@@ -496,7 +496,13 @@ describe('seedance 2.5 判定(2026-08-07,国内版新代)', () => {
             expect(MODEL_MAP[name].upstream).toBe('artsdance-2-5-pro-260801');
             expect(MODEL_MAP[name].region).toBeUndefined(); // 缺省 = cn base
         }
-        expect(MODEL_MAP['seedance2.5-480p']).toBeUndefined(); // 上游不支持 480p
+        // 480p 单档走原版(pro 版上游拒 480p,2026-09-07 开档)
+        for (const name of ['seedance2.5-480p', 'seedance2.5-480p-ref']) {
+            expect(MODEL_MAP[name]).toBeTruthy();
+            expect(MODEL_MAP[name].variant).toBe('2.5');
+            expect(MODEL_MAP[name].upstream).toBe('artsdance-2-5-260628');
+            expect(MODEL_MAP[name].region).toBeUndefined();
+        }
         expect(MODEL_MAP['seedance2.5-4k']).toBeUndefined(); // 无 4k
     });
 });
