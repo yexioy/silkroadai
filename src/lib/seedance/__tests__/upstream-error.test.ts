@@ -73,26 +73,27 @@ describe('脱敏(#271 硬约束)', () => {
 });
 
 describe('分类精度 —— 客户要能照着报错自己改', () => {
-    it('提示词被安全审核拒 → 说明是【提示词】,不是图', () => {
+    // 2026-09-05 起文案原生化:有火山风格原文就直出,分类职责在 category 上。
+    it('提示词被安全审核拒 → 归 content_safety,直出原文(无中文封装前缀)', () => {
         const r = classifyUpstreamError(REAL.sensitiveText, 400);
         expect(r.category).toBe('content_safety');
-        expect(r.message).toContain('提示词');
-        expect(r.message).not.toContain('参考图');
+        expect(r.message).toContain('sensitive');
+        expect(r.message).not.toContain('上游原因');
+        expect(r.message).not.toContain('——');
     });
 
-    it('参考图被安全审核拒 → 说明是【参考图】并带上素材 id', () => {
+    it('参考图被安全审核拒 → 归 content_safety(不误判下载失败),原文保留素材 id', () => {
         const r = classifyUpstreamError(REAL.sensitiveImage, 400);
         expect(r.category).toBe('content_safety');
-        expect(r.message).toContain('参考图');
-        // 审核必须先于「素材」判 —— 否则会被误报成下载失败
         expect(r.message).not.toContain('下载失败');
         expect(r.message).toContain('asset-20260817133221-8kb6b');
+        expect(r.message).not.toContain('上游原因');
     });
 
-    it('素材真的拉不到 → 才是下载失败', () => {
+    it('素材真的拉不到 → 归 media_fetch,直出原文', () => {
         const r = classifyUpstreamError(REAL.mediaFetch, 400);
         expect(r.category).toBe('media_fetch');
-        expect(r.message).toContain('下载失败');
+        expect(r.message.toLowerCase()).toContain('download');
     });
 
     it('分辨率不支持 → 分辨率类,且带上游原因', () => {
@@ -102,11 +103,10 @@ describe('分类精度 —— 客户要能照着报错自己改', () => {
         expect(r.message).toContain('720p');
     });
 
-    it('duration 按模式不合法 → 提示参考模式会影响可选时长', () => {
+    it('duration 按模式不合法 → 归 duration,直出原文', () => {
         const r = classifyUpstreamError(REAL.durationMode, 400);
         expect(r.category).toBe('duration');
-        expect(r.message).toContain('时长');
-        expect(r.message).toContain('参考');
+        expect(r.message.toLowerCase()).toContain('duration');
     });
 
     it('上游账户余额问题 → 归到服务方,不让客户以为是自己余额', () => {
@@ -122,10 +122,13 @@ describe('分类精度 —— 客户要能照着报错自己改', () => {
         expect(classifyUpstreamError('{"message":"whatever"}', 429).category).toBe('rate_limited');
     });
 
-    it('版权 → 版权类', () => {
+    it('版权 → 版权类(原文直出;无原文才回中文兜底)', () => {
         const r = classifyUpstreamError('{"error":{"message":"copyright violation detected in input image"}}', 400);
         expect(r.category).toBe('copyright');
-        expect(r.message).toContain('版权');
+        expect(r.message).toContain('copyright violation');
+        const fb = classifyUpstreamError('{"error":{"code":"CopyrightViolationDetected","message":""}}', 400);
+        expect(fb.category).toBe('copyright');
+        expect(fb.message).toContain('版权');
     });
 
     it('任务不存在 → 任务失效', () => {
@@ -153,8 +156,10 @@ describe('兜底也要说人话(本次事故的核心痛点)', () => {
             '<html><head><title>502 Bad Gateway</title></head><body>nginx</body></html>',
             502,
         );
+        // HTML 错误页不是给人看的文案 —— 整页丢弃走中文兜底,一个标签都不能透
         expect(r.message).not.toContain('nginx');
-        expect(r.message).toContain('上游暂时不可用');
+        expect(r.message).not.toContain('<');
+        expect(r.message).toContain('暂时不可用');
     });
 
     it('5xx → 可重试', () => {
@@ -176,7 +181,6 @@ describe('终态 vs 瞬时 —— 决定要不要停止轮询(2026-08-18,8925 �
             const r = classifyUpstreamError(body, 400);
             expect(r.category).toBe('task_type_constraint');
             expect(r.message).toContain('adaptive');
-            expect(r.message).toContain('视频编辑');
         }
     });
 
@@ -232,13 +236,32 @@ describe('终态 vs 瞬时 —— 决定要不要停止轮询(2026-08-18,8925 �
             400,
         );
         expect(r.category).toBe('invalid_parameter');
-        expect(r.message).toContain('素材不存在或不可用');
         expect(r.message).toContain('asset-20260828014656-n7mc9');
+        expect(r.message).toContain('is not found');
         expect(r.message).not.toContain('任务已失效');
     });
 
     it('真的任务不存在 → 仍归 task_gone', () => {
         expect(classifyUpstreamError('{"message":"task not found"}', 404).category).toBe('task_gone');
         expect(classifyUpstreamError('{"message":"任务不存在"}', 404).category).toBe('task_gone');
+    });
+
+    // 2026-09-05 客户投诉的原始报文,钉死最终输出:三层壳(我们的中文前缀、「上游原因」、
+    // 中间层的「资源同步失败: url= :」)全剥,只留火山那句原文 —— 像火山自己返回的一样。
+    it('客户投诉案例:内容安全报错直出火山原文,零封装痕迹', () => {
+        const r = classifyUpstreamError(
+            JSON.stringify({
+                error: {
+                    message:
+                        '资源同步失败: url=https://x.example.com/a.jpg : The request failed because the input image may contain sensitive information',
+                },
+            }),
+            400,
+        );
+        expect(r.category).toBe('content_safety');
+        expect(r.message).toBe('The request failed because the input image may contain sensitive information');
+        for (const leak of ['上游原因', '资源同步失败', 'url=', '——', '未通过内容安全审核']) {
+            expect(r.message).not.toContain(leak);
+        }
     });
 });

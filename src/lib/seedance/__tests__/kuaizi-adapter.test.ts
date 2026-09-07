@@ -170,7 +170,7 @@ describe('submitVolcVideo', () => {
         );
         const res = await submitVolcVideo({ prompt: 'x' }, opts());
         expect(res.status).toBe(400);
-        expect((await res.json()).error.message).toContain('内容安全审核');
+        expect((await res.json()).error.message).toContain('sensitive');
     });
 
     it('透传客户 content 数组(多模态)+ 火山官方可选字段', async () => {
@@ -239,7 +239,8 @@ describe('submitVolcVideo', () => {
         const res = await submitVolcVideo({ prompt: 'x' }, opts());
         expect(res.status).toBe(400);
         const body = (await res.json()) as { error: { message: string } };
-        expect(body.error.message).toContain('安全审核');
+        // 原生化(2026-09-05):原文直出;request_id 等标识仍必须剥
+        expect(body.error.message).toContain('sensitive content in image');
         expect(JSON.stringify(body)).not.toContain('request_id');
         expect(JSON.stringify(body)).not.toContain('7f9a72b7');
     });
