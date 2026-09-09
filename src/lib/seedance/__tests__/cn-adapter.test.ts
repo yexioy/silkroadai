@@ -500,7 +500,7 @@ describe('seedance 2.5 判定(2026-08-07,国内版新代)', () => {
         for (const name of ['seedance2.5-480p', 'seedance2.5-480p-ref']) {
             expect(MODEL_MAP[name]).toBeTruthy();
             expect(MODEL_MAP[name].variant).toBe('2.5');
-            expect(MODEL_MAP[name].upstream).toBe('artsdance-2-5-260628');
+            expect(MODEL_MAP[name].upstream).toBe('doubao-seedance-2-5-260628');
             expect(MODEL_MAP[name].region).toBeUndefined();
         }
         expect(MODEL_MAP['seedance2.5-4k']).toBeUndefined(); // 无 4k
