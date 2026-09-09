@@ -91,8 +91,8 @@ const AGENTS: AgentSection[] = [
     },
     {
         id: 'api-gpt-image',
-        label: 'GPT image-2 生图',
-        blurb: 'gpt-image-2 · OpenAI Images API · 文生图 + 图生图 · Azure 官方稳定 · 高并发 · 按 token 计费(¥1.3=官方$1)。',
+        label: 'GPT image-2 / 2.5 生图',
+        blurb: 'gpt-image-2 + 新增 gpt-image-2.5(flare / sunburst,5 档 quality)· OpenAI Images API · 文生图 + 图生图 · 官方稳定高并发 · 按官方 token 计费。',
     },
     {
         id: 'api-async-image',
@@ -2108,6 +2108,118 @@ curl "${OPENAI_BASE}/images/generations?strict=true" \\
   -H "Authorization: Bearer sk-你的KEY" -H "Content-Type: application/json" \\
   -d '{ "model": "gpt-image-2", "prompt": "...", "output_format": "jpeg" }'`}
                     </CodeBlock>
+
+                    {/* gpt-image-2.5 flare / sunburst — 官方直通,5 档 quality(2026-09-09 上线) */}
+                    <h3 className="m-0 mt-8 mb-2 text-base font-semibold text-navy">
+                        新增 · gpt-image-2.5(flare / sunburst)· 官方 5 档 quality
+                    </h3>
+                    <p className="m-0 mb-3 text-sm text-ink leading-relaxed">
+                        OpenAI 官方 gpt-image-2.5 两款模型已接入,调用方式与 gpt-image-2{' '}
+                        <strong className="text-navy">完全一致</strong>(同样的{' '}
+                        <code className="font-mono text-xs bg-paper-muted px-1.5 py-0.5 rounded border border-brand-border text-navy">
+                            /v1/images/generations
+                        </code>{' '}
+                        与{' '}
+                        <code className="font-mono text-xs bg-paper-muted px-1.5 py-0.5 rounded border border-brand-border text-navy">
+                            /v1/images/edits
+                        </code>{' '}
+                        · 文生图 / 图生图自动分流 · b64_json 或{' '}
+                        <code className="font-mono text-xs bg-paper-muted px-1.5 py-0.5 rounded border border-brand-border text-navy">
+                            {`"response_format":"url"`}
+                        </code>{' '}
+                        · size / background=transparent / output_format 同样支持),只把{' '}
+                        <code className="font-mono text-xs bg-paper-muted px-1.5 py-0.5 rounded border border-brand-border text-navy">
+                            model
+                        </code>{' '}
+                        换成{' '}
+                        <code className="font-mono text-xs bg-paper-muted px-1.5 py-0.5 rounded border border-brand-border text-navy">
+                            gpt-image-2.5-flare
+                        </code>{' '}
+                        或{' '}
+                        <code className="font-mono text-xs bg-paper-muted px-1.5 py-0.5 rounded border border-brand-border text-navy">
+                            gpt-image-2.5-sunburst
+                        </code>{' '}
+                        即可。
+                    </p>
+                    <div className="mt-1 mb-3 rounded-lg border-l-4 border-brand-accent bg-paper-muted px-4 py-3 text-sm text-ink">
+                        ✨ <strong className="text-navy">相比 gpt-image-2 的两点区别</strong>:①{' '}
+                        <code className="font-mono text-xs bg-surface px-1.5 py-0.5 rounded border border-brand-border text-navy">
+                            quality
+                        </code>{' '}
+                        从 3 档扩为 <strong className="text-navy">5 档:low / medium / high / xhigh / max</strong>
+                        (+auto);画质与 token 成本逐档递增。② flare 与 sunburst{' '}
+                        <strong className="text-navy">同 token 数、同价</strong>,区别是 sunburst 出图更精细但更慢 ——
+                        追求质量选 sunburst,追求速度选 flare。计价口径不变:
+                        <strong className="text-navy">按官方真实 token 用量结算</strong>,响应{' '}
+                        <code className="font-mono text-xs bg-surface px-1.5 py-0.5 rounded border border-brand-border text-navy">
+                            usage
+                        </code>{' '}
+                        即真实用量,可对官方计算器核对。
+                    </div>
+                    <div className="rounded-lg overflow-hidden border border-brand-border bg-surface mb-3">
+                        <table className="w-full border-collapse text-sm">
+                            <thead>
+                                <tr className="bg-paper-muted text-muted-ink">
+                                    <th className="text-left px-4 py-2.5 text-xs font-semibold border-b border-brand-border">
+                                        quality
+                                    </th>
+                                    <th className="text-left px-4 py-2.5 text-xs font-semibold border-b border-brand-border">
+                                        1024×1024 输出 token
+                                    </th>
+                                    <th className="text-left px-4 py-2.5 text-xs font-semibold border-b border-brand-border">
+                                        画质
+                                    </th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {(
+                                    [
+                                        ['low', '196', '草稿 / 缩略'],
+                                        ['medium', '439', '常规'],
+                                        ['high', '1,756', '精细(默认推荐)'],
+                                        ['xhigh', '3,122', '高精细'],
+                                        ['max', '7,024', '最高(最慢)'],
+                                        ['auto', '= low(196)', '未指定时'],
+                                    ] as const
+                                ).map(([q, tok, note]) => (
+                                    <tr key={q} className="border-b border-brand-border last:border-0">
+                                        <td className="px-4 py-3 font-mono text-xs text-navy align-top">{q}</td>
+                                        <td className="px-4 py-3 text-ink align-top">{tok}</td>
+                                        <td className="px-4 py-3 text-ink">{note}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                    <p className="m-0 mb-3 text-xs text-minor-ink leading-relaxed">
+                        表为 1024×1024 各档输出 token(官方计算器值);其它尺寸按官方公式随像素与档位变化,响应{' '}
+                        <code className="font-mono text-xs bg-paper-muted px-1 py-0.5 rounded border border-brand-border text-navy">
+                            usage.output_tokens
+                        </code>{' '}
+                        为准。max / xhigh 大图耗时较长(可达 60–150s),超时请设 ≥180s;需高分辨率同样支持到官方上限 (总像素
+                        ≤ 8.29MP,如 2880×2880 / 3840×2160)。
+                    </p>
+                    <CodeBlock language="bash">
+                        {`# gpt-image-2.5:文生图,quality 支持 low/medium/high/xhigh/max
+curl ${OPENAI_BASE}/images/generations \\
+  -H "Authorization: Bearer sk-你的KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "gpt-image-2.5-sunburst",
+    "prompt": "a golden retriever puppy on pavement, detailed fur",
+    "size": "1024x1024",
+    "quality": "xhigh"
+  }'
+# 图生图同 gpt-image-2:发到 /images/edits 带参考图,或 /images/generations 带 image_url`}
+                    </CodeBlock>
+                    <div className="mt-3 rounded-lg border-l-4 border-brand-border bg-paper-muted px-4 py-3 text-sm text-ink">
+                        🔑 <strong className="text-navy">Key 分组</strong>:gpt-image-2.5 需用
+                        <strong className="text-navy">「az image 2 大客户」档</strong>的 API Key;若你的 Key 调用报
+                        <code className="font-mono text-xs bg-surface px-1.5 py-0.5 rounded border border-brand-border text-navy">
+                            model_not_found
+                        </code>{' '}
+                        请联系客服开通该档。
+                    </div>
                 </section>
 
                 {/* ─── 14 · 异步生图 · 大图/批量免超时 ─── */}
