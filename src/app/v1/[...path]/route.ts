@@ -1377,6 +1377,11 @@ function ratioToSize(aspectRatio: string, size: string): string | null {
 function isGptImageModel(model: string): boolean {
     return model.startsWith('gpt-image') || model.startsWith('az-gpt-image');
 }
+/** gpt-image-2.5 系(flare / sunburst):quality 官方枚举扩成 5 档(+xhigh / max),走独立的
+ *  image-adapter25。此处只影响响应回显的枚举门控;gpt-image-2 路径零变化。 */
+function isGptImage25Model(model: string): boolean {
+    return model.startsWith('gpt-image-2.5');
+}
 /** 旧 czeq SKU 名 gpt-image-2-{1,2,4}k 只是别名(zhiyunai 上游只有 gpt-image-2 一个模型,分辨率靠
  *  size 像素控制)→ 翻成 gpt-image-2 + 对应像素 size(1k→1024² / 2k→2048² / 4k→3840x2160)。
  *  az- 前缀别名(az-gpt-image-2-4k 等)同样翻:base 保留 az- 前缀(new-api 按 az 名计费/映射)。
@@ -1682,6 +1687,9 @@ type ImageEchoFields = {
     gptDefaults: boolean;
     /** true = 我们明确认识的非 gpt-image 模型(seedream 等):上游「无渠道」按容量 503,不判 model_not_found。 */
     recognized?: boolean;
+    /** true = gpt-image-2.5 系:quality 回显枚举扩成 5 档(low/medium/high/xhigh/max)。
+     *  2.0 不设 → xhigh/max 仍归一 low(与 2.0 适配器计费口径一致)。 */
+    tier5?: boolean;
 };
 
 /** 非 Gemini 图片模型(gpt-image-2 等)透传 + 响应整形:
@@ -1692,9 +1700,11 @@ type ImageEchoFields = {
 /** 官方 gpt-image 响应 quality 枚举只有 low/medium/high。入参 auto/standard/缺省/未知按官方语义
  *  归一成 low(与适配器计费口径 normQuality 同源)。gptDefaults=false(非 gpt-image 模型)时缺省
  *  不回显。返回 '' = 不回显。 */
-export function normalizeEchoQuality(requested: string, gptDefaults: boolean): string {
+export function normalizeEchoQuality(requested: string, gptDefaults: boolean, tier5 = false): string {
     const s = requested.trim().toLowerCase();
     if (s === 'medium' || s === 'high' || s === 'low') return s;
+    // gpt-image-2.5 系官方多两档 xhigh / max(2026-09-09 官 key 实测各有独立 usage);2.0 不认 → 归一 low
+    if (tier5 && (s === 'xhigh' || s === 'max')) return s;
     // auto / standard / hd / 空 / 未知 → low(gpt-image 模型才补,其余不回显)
     return gptDefaults ? 'low' : '';
 }
@@ -1840,7 +1850,7 @@ async function reshapeOpenAiImageResponse(
     // 覆盖上游带的非法值(不再 `undefined 才补`):上游把 quality 漏成 standard 等旧词也纠正。
     if (echo) {
         const sniffed = sniffImageFormat(data);
-        const q = normalizeEchoQuality(echo.quality, echo.gptDefaults);
+        const q = normalizeEchoQuality(echo.quality, echo.gptDefaults, echo.tier5 === true);
         if (q) out.quality = q;
         const bg = normalizeEchoBackground(echo.background, echo.gptDefaults);
         if (bg) out.background = bg;
@@ -1983,6 +1993,7 @@ async function handleImagesDalle(
                     background: String(form.get('background') ?? ''),
                     outputFormat: String(form.get('output_format') ?? ''),
                     gptDefaults: isGptImageModel(model),
+                    tier5: isGptImage25Model(model),
                 };
                 const run = async (): Promise<NextResponse> => {
                     try {
@@ -2105,6 +2116,7 @@ async function handleImagesDalle(
                     outputFormat: typeof body.output_format === 'string' ? body.output_format : '',
                     gptDefaults: isGptImageModel(model),
                     recognized: seedream,
+                    tier5: isGptImage25Model(model),
                 };
                 const run = async (): Promise<NextResponse> => {
                     try {
