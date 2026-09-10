@@ -1485,6 +1485,33 @@ describe('vendor_task_id 出口(2026-08-19)', () => {
         expect(JSON.stringify(sent)).not.toContain('asset-20260828014656-n7mc9');
     });
 
+    it('volc:客户传大写 Asset:// 也认 —— 翻回上游号并归一成小写 asset://', async () => {
+        vi.mocked(toUpstreamId).mockImplementation(async (id: string) =>
+            id === 'asset-20260828014656-n7mc9' ? '193477566093328454' : id,
+        );
+        submitVolcVideo.mockImplementation(() =>
+            Promise.resolve(NextResponse.json({ id: 'cgt-x', task_id: 'cgt-x', status: 'queued' })),
+        );
+        await handleEnterpriseV1(
+            req('POST', '/v1/video/generations', {
+                model: 'doubao-seedance-2.5',
+                resolution: '720p',
+                content: [
+                    { type: 'text', text: 'x' },
+                    {
+                        type: 'image_url',
+                        image_url: { url: 'Asset://asset-20260828014656-n7mc9' },
+                        role: 'reference_image',
+                    },
+                ],
+            }),
+            '/video/generations',
+        );
+        const sent = JSON.stringify(submitVolcVideo.mock.calls[0][0]);
+        expect(sent).toContain('asset://193477566093328454'); // 归一小写 + 翻上游号
+        expect(sent).not.toContain('Asset://'); // 大写前缀不再残留
+    });
+
     // 2026-08-28 客户列为「明确不兼容项」:上游对 content[].*_url.url 有 4000 字符硬上限
     // (实测原文 `is too long (6118 chars, max 4000)`),真实图片的 base64 根本进不去。
     // cn 渠道早就替客户把 data URL 转存 R2,volc 之前没做 —— 同平台两条渠道能力不一致。
