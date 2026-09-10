@@ -36,7 +36,7 @@ import { randomBytes } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import { type SeedanceVariant } from './cn-adapter';
 import { rememberVolcId, toUpstreamId } from '@/lib/enterprise/volc-id-map';
-import { classifyUpstreamError } from './upstream-error';
+import { passthroughUpstreamError, sanitizeUpstreamText } from './upstream-error';
 
 const DEFAULT_BASE = 'https://aiopenapi.kuaizi.cn';
 const TASKS_PATH = '/ai-open-platform-api/api/v3/contents/generations/tasks';
@@ -313,8 +313,8 @@ export async function submitVolcVideo(body: Record<string, unknown>, opts: Kuaiz
     }
     const taskId = j?.id;
     if (!upstream.ok || !taskId) {
-        // 上游原始报错体(含 request_id / 上游域名)只落日志;对客给【分类后】文案(#271)。
-        const cls = classifyUpstreamError(text, upstream.status);
+        // 上游原始报错体(含 request_id / 上游域名)只落日志;对客【透传原文】(仅剥身份标记,#271)。
+        const cls = passthroughUpstreamError(text, upstream.status);
         console.warn('[kuaizi-adapter] submit failed', {
             model: opts.clientModel,
             upstream_model: spec.upstream,
@@ -388,7 +388,7 @@ export async function pollVolcVideo(id: string, upstreamKey?: string): Promise<N
         j = null;
     }
     if (!upstream.ok || !j) {
-        const cls = classifyUpstreamError(text, upstream.status);
+        const cls = passthroughUpstreamError(text, upstream.status);
         console.warn('[kuaizi-adapter] poll failed', {
             id,
             status: upstream.status,
@@ -409,10 +409,12 @@ export async function pollVolcVideo(id: string, upstreamKey?: string): Promise<N
               ? contentObj.kz_video_url
               : undefined;
     const lastFrameUrl = typeof contentObj?.last_frame_url === 'string' ? contentObj.last_frame_url : undefined;
+    // 生成失败原因【透传原文】(仅按 #271 剥身份标记:request_id / 域名等);上游原本就带
+    // request id 等 —— 此前这里是裸透传(潜在 #271 泄露),现走 sanitize 修掉身份、保留原因。
+    const rawFail =
+        status === 'failed' ? String((j.error as { message?: string } | undefined)?.message || j.message || '') : '';
     const failReason =
-        status === 'failed'
-            ? String((j.error as { message?: string } | undefined)?.message || j.message || 'generation failed')
-            : '';
+        status === 'failed' ? sanitizeUpstreamText(rawFail, { keepOpaqueIds: true }) || 'generation failed' : '';
     if (failReason) console.warn('[kuaizi-adapter] task failed upstream', { id, fail_reason: failReason });
     const usage = (j.usage ?? undefined) as Record<string, unknown> | undefined;
     // ⚠️ 不对客暴露 vendor_task_id —— 客户拿到的 `id` 是我们自造的火山方舟形号(提交即给);
