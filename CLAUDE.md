@@ -207,6 +207,10 @@ silkroadai/
 
 - [x] 客户 SDK `client.files.create(purpose='batch')` + `client.batches.*` 直接可用(此前 /v1/batches 兜底透传 new-api 全 404)。MVP 只收 `endpoint` = `/v1/images/{generations,edits}`;JSONL 逐行由 worker(`src/lib/batch/worker.ts`,挂 instrumentation 第 6 调度器,5s cadence + 重入守卫)**self-fetch 重放本实例 /v1/images/\* 同步管线** —— 计费/渠道 failover/错误归一/图床 URL 全走客户直调同一条路,worker 零计费逻辑。文件内容存 **PG Bytes**(公开读 image bucket 放不得客户 prompt),上限 20MB / 1000 行(env `BATCH_MAX_*` 可调);`response_format=b64_json` 校验时就地删掉(输出 URL 形,防 output 文件 GB 级)。**不做官方 5 折**(上游成本没变,按同步价计费)。migration `20260829120000_add_batch_api`(3 表全 additive,SQL 与 `prisma migrate diff --from-empty` 权威输出逐字核对)。逐行结果落 `batch_request_results`(唯一键幂等)→ 重启续跑;24h 超窗 → expired(带部分结果);每用户在途 5 批上限。39 新测(validate 10 / worker 10 / HTTP 面 19)+ instrumentation 测试更新;全套与基线红绿完全对齐。
 
+### image2 适配器上游超时按 provider 覆盖(2026-09-11)
+
+- [x] we-token 三线上游超时 600s→300s ✅(2026-09-11,分支 `fix/wetoken-upstream-timeout-300s`)— 客户 602018325@qq.com(c-70fd7c5f)报大量「10 分钟超时」:new-api 日志 `status_code=504, openai_error`、use_time 恰 600,只落 we-token 三渠道 ch176(asian-acc)/ch177(us-la)/ch219(asian-acc 2.5)。定位链:**504 是 Caddy `172.20.0.1:3010` 的 `response_header_timeout 600s` 发的** ← 适配器副本没在 600s 内回头 ← 适配器 Node fetch 直连 we-token **600s 收不到响应头**(`[image-adapter] upstream fetch failed { ms: 600001, err: 'This operation was aborted' }`,当日 4,441 条);同一分钟同渠道 90%+ 请求 p50 55s 正常出图、副本 CPU 20-50% → **是 we-token 后端阵发性挂死不回头**(与它同时段返 `408 the provider throttled … system under load` 同源),不是我方卡住。portal 代理 undici 600s / Caddy 3010 600s / 适配器 600s 三层同时到点 → 客户等满 10 分钟拿 `200 + {"error":{"message":"Upstream request failed"}}`,new-api 来不及换渠道(504 请求 finally_ok = 0)。修法:`ImageProvider.upstreamTimeoutMs?`(2.0)/ `ImageProvider25.upstreamTimeoutMs?`(2.5)按 provider 覆盖,`wetoken` / `wetokenasia` / `wetokenasia25` 设 `WETOKEN_UPSTREAM_TIMEOUT_MS = 300_000`,adapter 缺省 `DEFAULT_UPSTREAM_TIMEOUT_MS` 仍 600s(其他上游零变化;`wetokengated` 已停用未动)→ 挂死请求 5 分钟后 503 让 new-api failover 到 ch186/208 出图。代价:we-token >300s 才成功的 0.2%(当日 p99 203s / p99.9 390s)被误杀重跑。+5 单测(fake timers:299s 未掐 / 301s 掐 / 缺省 provider 600s)。部署走 server2 `deploy-image-adapter.sh`(image-adapter 只跑在 api-1..6)。诊断细节见 memory `reference_image_504_600s_wetoken_hang`。
+
 ### 企业门户「火山」渠道换上游 → 筷子开放平台(2026-08-17 上线)
 
 - [x] PR #386 merge `7cbb77f` + 部署 + 生产真机 smoke ✅ — volc region 上游从 new-api 形 provider(`ENTERPRISE_VOLC_VIDEO_*`)换成 **筷子 AI 开放平台** `https://aiopenapi.kuaizi.cn`。筷子对齐火山方舟官方 `contents/generations/tasks` 契约 → 对客方舟形接口近乎直通,**proxy 主干 / 计费 / 对客契约 / region 键全不变**,差异全吸收在适配器边界。
@@ -555,4 +559,4 @@ APP_PORT=3002
 ---
 
 **版本**: 2.3
-**最后更新**: 2026-08-17(企业门户「火山」渠道换上游 → 筷子开放平台)
+**最后更新**: 2026-09-11(we-token 上游超时 300s)

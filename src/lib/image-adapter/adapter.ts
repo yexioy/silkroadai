@@ -32,7 +32,9 @@ export type ImageMode = 'generations' | 'edits';
 // 一次成功率 70.6% → 92.7%,需重试的请求降约 78%。
 // 600s 与链路其余各层对齐(Caddy 3010 response_header_timeout 600s、instrumentation.ts
 // 的 undici dispatcher 600s),本常量原是整条链最短的一环。
-const UPSTREAM_TIMEOUT_MS = 600_000;
+// 2026-09-11:改为【缺省值】,provider 可用 `upstreamTimeoutMs` 单独覆盖(we-token 三线 300s,
+// 见 providers.ts 注释)。缺省仍 600s,其他上游行为不变。
+const DEFAULT_UPSTREAM_TIMEOUT_MS = 600_000;
 /** n>1 扇出的上限(对齐 OpenAI images 的 n≤10)。超出只钳制不报错 —— 客户仍拿到 10 张,
  *  也挡住 n=100 这种把单请求内存推到 GB 级(4K 单张 b64 ~12-17MB)的用法。 */
 const MAX_FANOUT = 10;
@@ -459,7 +461,8 @@ async function callUpstreamOnce(
 
     const started = Date.now();
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), UPSTREAM_TIMEOUT_MS);
+    const timeoutMs = provider.upstreamTimeoutMs ?? DEFAULT_UPSTREAM_TIMEOUT_MS;
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     let upstream: Response;
     try {
         upstream = await fetch(url, { method: 'POST', headers, body: upstreamBody, signal: ctrl.signal });
@@ -468,6 +471,7 @@ async function callUpstreamOnce(
             provider: providerName,
             mode,
             ms: Date.now() - started,
+            timeoutMs,
             err: e instanceof Error ? e.message : String(e),
         });
         return null;
