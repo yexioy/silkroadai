@@ -13,6 +13,7 @@ import {
     sanitizeAdapterError25,
     estimateTextTokens,
 } from '@/lib/image-adapter25/adapter';
+import { IMAGE_PROVIDERS_25, GPT_IMAGE_25_MODELS } from '@/lib/image-adapter25/providers';
 
 const URL_GEN = 'http://portal.test/image-adapter25/wetokenasia25/v1/images/generations';
 const URL_EDIT = 'http://portal.test/image-adapter25/wetokenasia25/v1/images/edits';
@@ -462,5 +463,70 @@ describe('handleAdapter25Image 透明 / 错误 / 脱敏', () => {
         expect(out).not.toContain('we-token');
         expect(out).not.toContain('adobe');
         expect(out).not.toContain('firefly');
+    });
+});
+
+// ---------------- per-provider 上游超时(2026-09-11,we-token 挂死不回头) ----------------
+describe('per-provider upstreamTimeoutMs', () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => {
+        vi.useRealTimers();
+        delete IMAGE_PROVIDERS_25.__defaulttimeout;
+    });
+
+    function hangingUpstream(): AbortSignal[] {
+        const signals: AbortSignal[] = [];
+        fetchMock.mockImplementation(
+            (_url: string, init: RequestInit) =>
+                new Promise<Response>((_resolve, reject) => {
+                    const s = init.signal as AbortSignal;
+                    signals.push(s);
+                    s.addEventListener('abort', () =>
+                        reject(new DOMException('This operation was aborted', 'AbortError')),
+                    );
+                }),
+        );
+        return signals;
+    }
+
+    it('wetokenasia25:300s 到点 abort → 503 failover(不再等满 600s)', async () => {
+        const signals = hangingUpstream();
+        const p = handleAdapter25Image(
+            jsonReq(URL_GEN, { model: 'gpt-image-2.5-flare', prompt: 'x', size: '1024x1024', quality: 'high' }),
+            'generations',
+            'wetokenasia25',
+        );
+        await vi.advanceTimersByTimeAsync(299_000);
+        expect(signals).toHaveLength(1);
+        expect(signals[0].aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(signals[0].aborted).toBe(true);
+        const res = await p;
+        expect(res.status).toBe(503);
+    });
+
+    it('未设 upstreamTimeoutMs 的 provider 仍是 600s 缺省', async () => {
+        IMAGE_PROVIDERS_25.__defaulttimeout = {
+            baseUrl: 'https://default.test',
+            brand: /\bdefault\b/gi,
+            models: GPT_IMAGE_25_MODELS,
+        };
+        const signals = hangingUpstream();
+        const p = handleAdapter25Image(
+            jsonReq('http://portal.test/image-adapter25/__defaulttimeout/v1/images/generations', {
+                model: 'gpt-image-2.5-flare',
+                prompt: 'x',
+                size: '1024x1024',
+                quality: 'high',
+            }),
+            'generations',
+            '__defaulttimeout',
+        );
+        await vi.advanceTimersByTimeAsync(301_000);
+        expect(signals).toHaveLength(1);
+        expect(signals[0].aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(300_000);
+        expect(signals[0].aborted).toBe(true);
+        expect((await p).status).toBe(503);
     });
 });

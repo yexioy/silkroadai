@@ -17,7 +17,14 @@ export interface ImageProvider25 {
     /** 允许透传给上游的模型名白名单。2.5 一条渠道承两个模型,必须按【客户请求的模型】透传
      *  (flare / sunburst 上游分开算),不能像 2.0 那样写死一个名。不在名单 → 503 让路(配置错)。 */
     models: ReadonlyArray<string>;
+    /** 单次上游调用超时(ms),缺省 = adapter.ts DEFAULT_UPSTREAM_TIMEOUT_MS(600s)。语义与 2.0 的
+     *  ImageProvider.upstreamTimeoutMs 相同:we-token 会阵发性挂死不回头(2026-09-10 实证,2.5 线当日
+     *  1,974 次 600s 空等),300s 让 new-api 早点 failover / 早点把错误交回客户。 */
+    upstreamTimeoutMs?: number;
 }
+
+/** we-token 系上游的单次调用超时(与 @/lib/image-adapter/providers 的同名常量语义一致,模块独立不共享)。 */
+export const WETOKEN_UPSTREAM_TIMEOUT_MS = 300_000;
 
 /** 2.5 系官方模型名。token 公式两者完全相同(2026-09-09 官 key 交叉验证逐 token 一致),
  *  区别是 sunburst 更慢(max 档 147s vs 46s)、画质更好;单价由 operator 在 new-api 后台按官方设。 */
@@ -34,5 +41,6 @@ export const IMAGE_PROVIDERS_25: Record<string, ImageProvider25> = {
         baseUrl: 'https://asian-acc.we-token.cc',
         brand: /\bwe-?token\b|\badobe\b|\bfirefly\b/gi,
         models: GPT_IMAGE_25_MODELS,
+        upstreamTimeoutMs: WETOKEN_UPSTREAM_TIMEOUT_MS, // 2026-09-11:we-token 挂死不回头,600s→300s
     },
 };

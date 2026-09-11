@@ -1683,3 +1683,67 @@ describe('适配器响应合规下沉(echo 官方枚举 + jpeg 转码,覆盖直�
         expect(b.output_format).toBe('jpeg');
     });
 });
+
+// ---------------- per-provider 上游超时(2026-09-11,we-token 挂死不回头) ----------------
+describe('per-provider upstreamTimeoutMs', () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    /** 模拟【永不回响应头】的上游:promise 只在 signal abort 时 reject(与 we-token 挂死同形)。 */
+    function hangingUpstream(): AbortSignal[] {
+        const signals: AbortSignal[] = [];
+        fetchMock.mockImplementation(
+            (_url: string, init: RequestInit) =>
+                new Promise<Response>((_resolve, reject) => {
+                    const s = init.signal as AbortSignal;
+                    signals.push(s);
+                    s.addEventListener('abort', () =>
+                        reject(new DOMException('This operation was aborted', 'AbortError')),
+                    );
+                }),
+        );
+        return signals;
+    }
+
+    it.each(['wetoken', 'wetokenasia'])('%s:300s 到点 abort → 503 failover(不再等满 600s)', async (prov) => {
+        const signals = hangingUpstream();
+        const p = handleAdapterImage(
+            jsonReq(`http://portal.test/image-adapter/${prov}/v1/images/generations`, {
+                model: 'gpt-image-2',
+                prompt: 'x',
+                size: '1024x1024',
+                quality: 'high',
+            }),
+            'generations',
+            prov,
+        );
+        await vi.advanceTimersByTimeAsync(299_000);
+        expect(signals).toHaveLength(1);
+        expect(signals[0].aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(signals[0].aborted).toBe(true);
+        const res = await p;
+        expect(res.status).toBe(503);
+        expect(((await res.json()) as { error: { code: string } }).error.code).toBe('upstream_unavailable');
+    });
+
+    it('未设 upstreamTimeoutMs 的 provider(ominiapifull)仍是 600s', async () => {
+        const signals = hangingUpstream();
+        const p = handleAdapterImage(
+            jsonReq('http://portal.test/image-adapter/ominiapifull/v1/images/generations', {
+                model: 'gpt-image-2',
+                prompt: 'x',
+                size: '1024x1024',
+                quality: 'high',
+            }),
+            'generations',
+            'ominiapifull',
+        );
+        await vi.advanceTimersByTimeAsync(301_000);
+        expect(signals).toHaveLength(1);
+        expect(signals[0].aborted).toBe(false); // 300s 过了还没掐
+        await vi.advanceTimersByTimeAsync(300_000);
+        expect(signals[0].aborted).toBe(true); // 600s 才掐
+        expect((await p).status).toBe(503);
+    });
+});

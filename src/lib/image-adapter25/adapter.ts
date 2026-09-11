@@ -29,8 +29,9 @@ import { IMAGE_PROVIDERS_25, type ImageProvider25 } from './providers';
 
 export type ImageMode = 'generations' | 'edits';
 
-/** 与链路其余各层对齐(Caddy 3010 response_header_timeout 600s、undici dispatcher 600s)。 */
-const UPSTREAM_TIMEOUT_MS = 600_000;
+/** 缺省与链路其余各层对齐(Caddy 3010 response_header_timeout 600s、undici dispatcher 600s);
+ *  provider 可用 `upstreamTimeoutMs` 单独覆盖(we-token 300s,见 providers.ts)。 */
+const DEFAULT_UPSTREAM_TIMEOUT_MS = 600_000;
 /** 对齐 OpenAI images 的 n≤10;超出只钳制不报错。 */
 const MAX_N = 10;
 
@@ -432,7 +433,8 @@ async function callUpstream(
 
     const started = Date.now();
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), UPSTREAM_TIMEOUT_MS);
+    const timeoutMs = provider.upstreamTimeoutMs ?? DEFAULT_UPSTREAM_TIMEOUT_MS;
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     let upstream: Response;
     try {
         upstream = await fetch(url, { method: 'POST', headers, body: upstreamBody, signal: ctrl.signal });
@@ -441,6 +443,7 @@ async function callUpstream(
             provider: providerName,
             mode,
             ms: Date.now() - started,
+            timeoutMs,
             err: e instanceof Error ? e.message : String(e),
         });
         return null;
