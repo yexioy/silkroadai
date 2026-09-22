@@ -3,7 +3,7 @@
  * 覆盖:档位→上游单模型+resolution 映射、参考模式门控(防串档)、data URL 转 R2、
  * duration/ratio 归一、提交/轮询信封、成片转存 R2、model/prompt 校验。
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 
 const mockUploadImage = vi.fn(
@@ -12,8 +12,14 @@ const mockUploadImage = vi.fn(
 vi.mock('@/lib/r2/client', () => ({
     uploadImage: (key: string, body: Buffer, ct?: string) => mockUploadImage(key, body, ct),
 }));
+// 2.5 480p(service-inference.ai)的对客号 ↔ 上游号映射表:翻译层,单测 stub 掉(缺省原样返回 = 存量 xinhankr 任务)。
+const { rememberVolcId, toUpstreamId } = vi.hoisted(() => ({
+    rememberVolcId: vi.fn(async () => {}),
+    toUpstreamId: vi.fn(async (id: string) => id),
+}));
+vi.mock('@/lib/enterprise/volc-id-map', () => ({ rememberVolcId, toUpstreamId }));
 
-import { submitVideo, pollVideo } from '../cn-adapter';
+import { submitVideo, pollVideo, cancelVideoWithKey } from '../cn-adapter';
 
 const json = (obj: unknown, status = 200) =>
     new Response(JSON.stringify(obj), { status, headers: { 'content-type': 'application/json' } });
@@ -701,5 +707,196 @@ describe('上游报错友好化(2026-08-11):审核类给可操作提示,且不�
         });
         const m = ((await res.json()) as { error: { message: string } }).error.message;
         expect(m).not.toMatch(/xinhankr|artsmcp|nginx|Request ID|abc123|\.com/);
+    });
+});
+
+/**
+ * 国内版 seedance-2-5 的 480p 单档改走 service-inference.ai(2026-09-22,operator 拍板;与火山渠道同一家上游,
+ * 独立 key、走 /v1)。只有配了 SEEDANCE_SVCINF_KEY 才切,未配回落 xinhankr doubao-260628(部署缺 env 不断档)。
+ */
+describe('国内版 2.5 480p 单档 → service-inference.ai(/v1)', () => {
+    const SVC = 'https://model.service-inference.ai';
+    const SVC_KEY = 'sk-inf-v1-cn-480p-key';
+    /** 打到 service-inference.ai 的提交体。 */
+    const svcSubmitCall = () =>
+        mockFetch.mock.calls.find(
+            (c) => String(c[0]) === `${SVC}/v1/video/generate` && (c[1] as RequestInit)?.method === 'POST',
+        );
+
+    beforeEach(() => {
+        vi.stubEnv('SEEDANCE_SVCINF_KEY', SVC_KEY);
+        mockFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+            const u = String(url);
+            const method = (init?.method || 'GET').toUpperCase();
+            if (u === `${SVC}/v1/video/generate` && method === 'POST') {
+                return json({ task: { id: 'mvt-abc123', status: 'pending', outputs: [], error: null } });
+            }
+            if (u.startsWith(`${SVC}/v1/video/tasks/`) && method === 'GET') {
+                return json({
+                    task: {
+                        id: 'mvt-abc123',
+                        status: 'completed',
+                        outputs: [
+                            'https://ark-acg-cn-beijing.tos-cn-beijing.volces.com/doubao-seedance-2-5/x.mp4?sig=1',
+                        ],
+                        error: null,
+                        usage: { completion_tokens: 38830, total_tokens: 38830 },
+                        metadata: {
+                            id: 'cgt-20260922232424-rqurx',
+                            status: 'succeeded',
+                            content: {
+                                video_url:
+                                    'https://ark-acg-cn-beijing.tos-cn-beijing.volces.com/doubao-seedance-2-5/x.mp4?sig=1',
+                            },
+                            duration: 4,
+                            ratio: '16:9',
+                            resolution: '480p',
+                            seed: 7,
+                            framespersecond: 24,
+                        },
+                    },
+                });
+            }
+            if ((u === `${UP}/v1/video/generations` || u === `${INTL}/v1/video/generations`) && method === 'POST') {
+                return json({ id: 'cgt-test-1', task_id: 'cgt-test-1', object: 'video.generation', status: 'pending' });
+            }
+            if (/\/v1\/video\/generations\/[^/]+$/.test(u) && method === 'GET') {
+                return json({
+                    id: 'cgt-test-1',
+                    status: 'completed',
+                    data: [{ url: `${UP}/out/x.mp4` }],
+                    usage: { completion_tokens: 1 },
+                });
+            }
+            return new Response(Buffer.from([0x00, 0x00, 0x00, 0x18]), {
+                status: 200,
+                headers: { 'content-type': 'image/jpeg' },
+            });
+        });
+    });
+    afterEach(() => vi.unstubAllEnvs());
+
+    it('seedance2.5-480p 文生:打 /v1/video/generate + 平台 sk-inf key,model=-max 名,prompt 翻成 content,对客 id 自造 cgt- 并记映射', async () => {
+        const res = await submitVideo(makeReq({ model: 'seedance2.5-480p', prompt: '一只猫', duration: 4, seed: 9 }));
+        expect(res.status).toBe(200);
+        const j = (await res.json()) as { id: string; task_id: string; model: string; status: string };
+        expect(j.id).toMatch(/^cgt-\d{14}-[a-z0-9]{5}$/);
+        expect(j.id).not.toContain('mvt-');
+        expect(j.task_id).toBe(j.id);
+        expect(j.model).toBe('seedance2.5-480p');
+        expect(j.status).toBe('queued');
+        expect(rememberVolcId).toHaveBeenCalledWith(j.id, 'mvt-abc123', 'task');
+
+        const call = svcSubmitCall();
+        expect(call).toBeDefined();
+        expect((call![1] as RequestInit).headers).toMatchObject({ Authorization: `Bearer ${SVC_KEY}` });
+        const sent = JSON.parse(String((call![1] as RequestInit).body)) as Record<string, unknown>;
+        expect(sent.model).toBe('doubao-seedance-2-5-260628-max');
+        expect(sent.content).toEqual([{ type: 'text', text: '一只猫' }]);
+        expect(sent.resolution).toBe('480p');
+        expect(sent.duration).toBe(4);
+        expect(sent.seed).toBe(9);
+        expect(sent.generate_audio).toBe(true);
+        for (const k of ['prompt', 'images', 'videos', 'audios']) expect(sent).not.toHaveProperty(k);
+        // 客户/渠道的 xinhankr key 不发给这家上游;xinhankr 也一个字节不打
+        expect(mockFetch.mock.calls.some((c) => String(c[0]).startsWith(UP))).toBe(false);
+    });
+
+    it('seedance2.5-480p-ref:首帧 + 参考图 + 参考视频 + data URL 音频 → content 数组带 role,顺序不变', async () => {
+        await submitVideo(
+            makeReq({
+                model: 'seedance2.5-480p-ref',
+                prompt: '@Image1 动起来',
+                first_frame: 'https://cdn.test/first.jpg',
+                images: ['https://cdn.test/ref.jpg'],
+                reference_videos: ['https://cdn.test/ref.mp4'],
+                audios: ['data:audio/mpeg;base64,AAAA'],
+            }),
+        );
+        const sent = JSON.parse(String((svcSubmitCall()![1] as RequestInit).body)) as {
+            content: Array<Record<string, unknown>>;
+        };
+        // 显式 first_frame 优先(与 xinhankr 路径同一套 imageSpecs 规则),images 不再并入
+        expect(sent.content).toEqual([
+            { type: 'text', text: '@Image1 动起来' },
+            { type: 'image_url', image_url: { url: 'https://cdn.test/first.jpg' }, role: 'first_frame' },
+            { type: 'video_url', video_url: { url: 'https://cdn.test/ref.mp4' }, role: 'reference_video' },
+            {
+                type: 'audio_url',
+                audio_url: { url: expect.stringMatching(/^https:\/\/images\.silkroadai\.io\/seedance-cn-ref\//) },
+                role: 'reference_audio',
+            },
+        ]);
+    });
+
+    it('seedance2.5-720p 不受影响,仍走 xinhankr pro 版', async () => {
+        await submitVideo(makeReq({ model: 'seedance2.5-720p', prompt: 'x' }));
+        expect(svcSubmitCall()).toBeUndefined();
+        expect(submitBody().model).toBe('artsdance-2-5-pro-260801');
+        expect(rememberVolcId).not.toHaveBeenCalled();
+    });
+
+    it('未配 SEEDANCE_SVCINF_KEY → 480p 回落 xinhankr doubao-260628(缺 env 不断档)', async () => {
+        vi.stubEnv('SEEDANCE_SVCINF_KEY', '');
+        await submitVideo(makeReq({ model: 'seedance2.5-480p', prompt: 'x' }));
+        expect(svcSubmitCall()).toBeUndefined();
+        expect(submitBody().model).toBe('doubao-seedance-2-5-260628');
+    });
+
+    it('上游报错 → 透传状态码 + 脱敏文案(request_id 不对客)', async () => {
+        mockFetch.mockImplementationOnce(async () =>
+            json(
+                {
+                    error: { message: "Model 'x' is not available to your account", type: 'proxy_error' },
+                    request_id: 'req-9',
+                },
+                403,
+            ),
+        );
+        const res = await submitVideo(makeReq({ model: 'seedance2.5-480p', prompt: 'x' }));
+        expect(res.status).toBe(403);
+        const t = await res.text();
+        expect(t).toContain('not available');
+        expect(t).not.toContain('req-9');
+        expect(rememberVolcId).not.toHaveBeenCalled();
+    });
+
+    it('轮询:对客号经映射得到 mvt- → 打 /v1/video/tasks/{mvt}(平台 key),归一成 completed + usage + 方舟元数据', async () => {
+        toUpstreamId.mockResolvedValueOnce('mvt-abc123');
+        const res = await pollVideo(pollReq(), 'cgt-20260922232424-aaaaa');
+        expect(res.status).toBe(200);
+        const j = (await res.json()) as Record<string, unknown>;
+        expect(j.id).toBe('cgt-20260922232424-aaaaa');
+        expect(j.status).toBe('completed');
+        expect(j.video_url).toContain('ark-acg-cn-beijing');
+        expect((j.usage as { completion_tokens: number }).completion_tokens).toBe(38830);
+        expect(j.duration).toBe(4);
+        expect(j.resolution).toBe('480p');
+        const call = mockFetch.mock.calls.find((c) => String(c[0]) === `${SVC}/v1/video/tasks/mvt-abc123`);
+        expect(call).toBeDefined();
+        expect((call![1] as RequestInit).headers).toMatchObject({ Authorization: `Bearer ${SVC_KEY}` });
+        expect(JSON.stringify(j)).not.toContain('mvt-');
+    });
+
+    it('轮询:映射查不到(存量 xinhankr 任务)→ 照旧打 xinhankr,不打 service-inference.ai', async () => {
+        const res = await pollVideo(pollReq(), 'cgt-test-1');
+        expect(res.status).toBe(200);
+        expect(mockFetch.mock.calls.some((c) => String(c[0]).startsWith(SVC))).toBe(false);
+        expect(mockFetch.mock.calls.some((c) => String(c[0]) === `${UP}/v1/video/generations/cgt-test-1`)).toBe(true);
+    });
+
+    it('轮询:映射到 mvt- 但 env 未配 → 503,不打上游', async () => {
+        vi.stubEnv('SEEDANCE_SVCINF_KEY', '');
+        toUpstreamId.mockResolvedValueOnce('mvt-abc123');
+        const res = await pollVideo(pollReq(), 'cgt-x');
+        expect(res.status).toBe(503);
+        expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('取消:service-inference.ai 无取消端点 → 合成 501,不打任何上游', async () => {
+        toUpstreamId.mockResolvedValueOnce('mvt-abc123');
+        const r = await cancelVideoWithKey('cgt-x', 'Bearer sk-9066test');
+        expect(r.status).toBe(501);
+        expect(mockFetch).not.toHaveBeenCalled();
     });
 });
