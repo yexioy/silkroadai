@@ -557,8 +557,18 @@ print(j.get("video_url"), j.get("usage"))`}</Pre>
                 </p>
                 <p className="text-gray-600">
                     <b>火山官方参数一律透传</b> —— <Code>bitrate_mode</Code> / <Code>camera_fixed</Code> /{' '}
-                    <Code>service_tier</Code> / <Code>priority</Code> 等按火山文档传即可,能不能用由火山判。(
+                    <Code>service_tier</Code> / <Code>priority</Code> / <Code>tools</Code>{' '}
+                    等按火山文档传即可,能不能用由火山判。(
                     <Code>callback_url</Code> 暂不支持,请改用轮询。)
+                </p>
+                <p className="text-gray-600">
+                    <b>查询响应对齐火山官方 2026-09 字段集</b>(国内版 / 火山渠道均适用):除 <Code>id</Code> /{' '}
+                    <Code>model</Code> / <Code>status</Code> / <Code>content</Code> / <Code>error</Code> /{' '}
+                    <Code>created_at</Code> / <Code>updated_at</Code> / <Code>resolution</Code> / <Code>ratio</Code> /{' '}
+                    <Code>duration</Code> / <Code>usage</Code> 外,还返回 <Code>execution_expires_after</Code> /{' '}
+                    <Code>frames</Code> / <Code>framespersecond</Code> / <Code>generate_audio</Code> /{' '}
+                    <Code>output_format</Code> / <Code>seed</Code> / <Code>service_tier</Code>;创建时传了{' '}
+                    <Code>safety_identifier</Code> / <Code>tools</Code> 会原样回显,没传则不出现该键。
                 </p>
                 <p className="text-gray-600">
                     <Code>duration: -1</Code> = 智能时长(由模型在有效区间内自选)——{' '}

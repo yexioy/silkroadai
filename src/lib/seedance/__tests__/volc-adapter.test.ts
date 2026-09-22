@@ -518,9 +518,8 @@ const INTENTIONALLY_NOT_PASSED: Record<string, string> = {
     'metadata.usage': '同顶层 usage',
     'metadata.content': '逐键处理:video_url 可能换客户 OSS;last_frame_url 透出',
     'metadata.draft': 'ark-format 固定合成 draft:false(火山官方形要求恒在)',
-    'metadata.output_format': '提交参数回显,ark-format 由库值/固定值合成',
-    'metadata.priority': '提交参数回显,ark-format 由固定值合成',
-    'metadata.service_tier': 'ark-format 固定合成(客户基准要)',
+    'metadata.priority': '火山官方查询响应无此字段,不透',
+    // output_format / service_tier / safety_identifier 自 2026-09-23 起透出(火山官方查询响应新增字段)
 };
 
 describe('上游字段契约守护(2026-09-22 换上游后重钉 fixture)', () => {
