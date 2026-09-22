@@ -502,8 +502,8 @@ print(j.get("video_url"), j.get("usage"))`}</Pre>
 
             <Section id="volc" title="5. 火山渠道(volc · 火山方舟原生 + AK/SK 签名)">
                 <p>
-                    <b>火山渠道</b>是独立渠道(与国内/海外/proMax 平级),提供<b>真人视觉认证</b>与{' '}
-                    <b>seedance 2.0 / 2.5 两档</b>视频,采用<b>火山方舟原生接口形态</b> +{' '}
+                    <b>火山渠道</b>是独立渠道(与国内/海外/proMax 平级),提供{' '}
+                    <b>seedance 2.0 / 2.0-fast / 2.0-mini / 2.5 四档</b>视频,采用<b>火山方舟原生接口形态</b> +{' '}
                     <b>火山官方 AK/SK 签名(SignerV4)</b>
                     鉴权 —— 现有火山官方 SDK / 脚本可零改动接入。需在「API 密钥」页开通并生成 AK/SK,专用密钥,与 sk-ent
                     并存互不影响。
@@ -522,6 +522,8 @@ print(j.get("video_url"), j.get("usage"))`}</Pre>
                         <tbody className="text-gray-700">
                             {[
                                 ['doubao-seedance-2-0-260128', '480p / 720p / 1080p / 4k', '4~15 或 -1', '9 / 3 / 3'],
+                                ['doubao-seedance-2-0-fast-260128', '480p / 720p', '4~15 或 -1', '9 / 3 / 3'],
+                                ['doubao-seedance-2-0-mini-260615', '480p / 720p', '4~15 或 -1', '9 / 3 / 3'],
                                 ['doubao-seedance-2-5-260628', '480p / 720p / 1080p', '4~30 或 -1', '30 / 10 / 10'],
                             ].map(([m, r, d, refs]) => (
                                 <tr key={m} className="border-b border-gray-100">
@@ -569,7 +571,8 @@ print(j.get("video_url"), j.get("usage"))`}</Pre>
                 </p>
                 <p className="text-gray-600">
                     <Code>doubao-seedance-2-0-fast-260128</Code> / <Code>doubao-seedance-2-0-mini-260615</Code>{' '}
-                    <b>暂停服务</b> —— 这两档当前不由火山方舟出片,与本渠道「原生火山」的定位不符, 恢复前请改用上表两档。
+                    两档已恢复供应(2026-09-22 起),仅支持 <Code>480p</Code> / <Code>720p</Code>,传 <Code>1080p</Code>
+                    会被拒。
                 </p>
                 <p className="font-medium text-gray-900">config 关键字段(以火山官方素材库/方舟脚本为例):</p>
                 <Pre>{`{
@@ -635,6 +638,11 @@ print(j.get("video_url"), j.get("usage"))`}</Pre>
             </Section>
 
             <Section id="realperson" title="6. 火山渠道 · 真人视觉认证">
+                <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                    <b>服务暂停中(2026-09-22 起)</b> —— 真人活体认证暂不可用,两个 Action 会返回{' '}
+                    <Code>503 ServiceUnavailable</Code>;含真人人脸的参考素材当前会被上游拒绝。恢复时间另行通知,
+                    以下内容保留供恢复后参考。
+                </div>
                 <p>
                     在 AIGC 视频里使用<b>真人的脸</b>时,火山要求先由本人完成一次<b>活体认证授权</b>(合规,无法绕过)。
                     火山渠道专属,采用 AK/SK 签名(Action 形态),两步:

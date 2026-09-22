@@ -31,13 +31,13 @@ import {
     submitVolcVideo,
     pollVolcVideo,
     cancelVolcVideo,
-    customerKuaiziKey,
+    customerVolcUpstreamKey,
     volcRefLimits,
     VOLC_MODELS,
     VOLC_RESOLUTIONS,
     isVolcModelWithdrawn,
     WITHDRAWN_VOLC_HINT,
-} from '@/lib/seedance/kuaizi-adapter';
+} from '@/lib/seedance/volc-adapter';
 import { callerHasVolc, resolveEnterpriseAuth, getUpstreamKeyForUser, type EnterpriseCustomer } from './keys';
 import { toUpstreamId } from './volc-id-map';
 import { uploadImage } from '@/lib/r2/client';
@@ -97,7 +97,7 @@ function resolveEnterpriseModel(
     // 「火山」渠道:四档模型(doubao-seedance-2.0 / -fast / -mini / doubao-seedance-2.5),
     // resolution 参数 + ref 自动识别。走独立 adapter(火山方舟原生),不经 MODEL_MAP 长名机制。
     if (isVolcModel(lower)) {
-        // 下架档位(fast/mini 实测不落方舟,见 kuaizi-adapter 的 WITHDRAWN_VOLC_MODELS)——
+        // 下架档位(env 临时下架,见 volc-adapter 的 isVolcModelWithdrawn(env 名单))——
         // 在解析最前面拦掉,连参数校验都不必走。
         if (isVolcModelWithdrawn(lower)) {
             return { error: errJson(400, 'model_unavailable', `${rawModel}:${WITHDRAWN_VOLC_HINT}`) };
@@ -730,7 +730,7 @@ async function handleSubmitInner(req: NextRequest, format: ClientFormat, ctx: Re
                   clientModel: adapterModel,
                   resolution: map.resolution,
                   duration,
-                  upstreamKey: customerKuaiziKey(cust.upstreamKey),
+                  upstreamKey: customerVolcUpstreamKey(cust.upstreamKey),
               })
             : await submitVideoWithKey({ ...body, model: adapterModel }, `Bearer ${cust.upstreamKey}`);
     const text = await res.text();
@@ -926,7 +926,7 @@ async function handlePollInner(
     const { result: upstream, cached } = await pollWithCache(taskId, async () => {
         const r =
             taskRegion === 'volc'
-                ? await pollVolcVideo(taskId, customerKuaiziKey(cust.upstreamKey))
+                ? await pollVolcVideo(taskId, customerVolcUpstreamKey(cust.upstreamKey))
                 : await pollVideoWithKey(taskId, `Bearer ${upstreamKey}`, taskRegion);
         return { status: r.status, text: await r.text() };
     });

@@ -60,14 +60,14 @@ const UPSTREAM_XHK_25 = process.env.SEEDANCE_XHK_MODEL_25 || 'artsdance-2-5-pro-
 const UPSTREAM_XHK_25_480P = process.env.SEEDANCE_XHK_MODEL_25_480P || 'doubao-seedance-2-5-260628';
 
 /** 版本 → 上游 base URL(global 与 promax 同为 intl 端口,仅模型名/费率不同)。
- *  volc(火山渠道)走独立上游 + 火山方舟原生协议,不经此函数(见 kuaizi-adapter)。 */
+ *  volc(火山渠道)走独立上游 + 火山方舟原生协议,不经此函数(见 volc-adapter)。 */
 export type SeedanceRegion = 'cn' | 'global' | 'promax' | 'volc';
 export function baseForRegion(region: SeedanceRegion): string {
     return region === 'global' || region === 'promax' ? INTL_BASE : XHK_BASE;
 }
 
-/** 「火山」渠道对客模型名(火山方舟点分形)。2026-08-17 换上游(筷子开放平台)后由单模型
- *  扩到四档;上游 Model ID 与档位映射见 kuaizi-adapter 的 VOLC_MODELS。
+/** 「火山」渠道对客模型名(火山方舟点分形)。2026-08-17 换上游后由单模型
+ *  扩到四档;上游 Model ID 与档位映射见 volc-adapter 的 VOLC_MODELS。
  *  ⚠️ 必须是点分形 —— 连字符形(doubao-seedance-2-0-260128 等)被 ark-format 归一到国内版
  *  短名 seedance-2-0 系(cn 渠道),两套命名不能相撞。 */
 export const VOLC_MODEL = 'doubao-seedance-2.0';
@@ -263,7 +263,7 @@ export function maxDurationForVariant(v: SeedanceVariant): number {
 // 火山官方 2.5 支持 adaptive(首尾帧/视频编辑/延长任务【必须】adaptive → 输出跟随输入宽高比)。
 const ALLOWED_RATIOS = new Set(['16:9', '9:16', '4:3', '3:4', '1:1', '21:9', 'adaptive']);
 
-// 反向白名单透传(与火山渠道 kuaizi-adapter 对齐,2026-09-10):我们只挡【自己消费/翻译掉】的键,
+// 反向白名单透传(与火山渠道 volc-adapter 对齐,2026-09-10):我们只挡【自己消费/翻译掉】的键,
 // 其余客户传的字段一律原样转发给上游 —— 逐个列白名单必然落后于上游,曾把 bitrate_mode /
 // watermark / service_tier / priority 等火山官方字段静默吃掉(客户 liyan2 传 bitrate_mode 上游没收到)。
 // CONSUMED = 我们显式构造 upstreamBody 时读掉的键(含各种参考输入别名,proxy 已并进 images/videos,
@@ -561,7 +561,7 @@ export async function submitVideoWithKey(body: Record<string, unknown>, auth: st
     const durRaw = Number(body.duration ?? body.seconds);
     const maxDur = maxDurationForVariant(map.variant);
     const duration = durRaw === -1 ? -1 : Number.isInteger(durRaw) && durRaw >= 4 && durRaw <= maxDur ? durRaw : 5;
-    // ratio:**客户没传就不注入**,由上游按任务类型自己定 —— 与火山渠道 kuaizi-adapter 对齐。
+    // ratio:**客户没传就不注入**,由上游按任务类型自己定 —— 与火山渠道 volc-adapter 对齐。
     // 此前硬塞 16:9:首帧/首尾帧任务上游要求「输出比例跟随首帧图」(只接受不指定/adaptive),
     // 我们替客户填了 16:9 → 上游 task_type_constraint 拒(2026-09-11 客户 jingdong 报障)。
     // 「不指定」是有意义的取值,不能被默认值吃掉。显式传了才注入;非法值宽松纠正成 16:9。
