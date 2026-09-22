@@ -1835,3 +1835,164 @@ describe('请求日志落库(2026-09-03)', () => {
         await flush();
     });
 });
+
+/**
+ * 2026-09-23:火山官方「查询视频生成任务」响应新增 execution_expires_after / frames / framespersecond /
+ * generate_audio / output_format / safety_identifier / seed / service_tier / tools。
+ * 国内版此前按旧文档只出 11 个字段;safety_identifier / output_format / tools 上游(xinhankr)不回显 →
+ * 提交时落库再回显;`tools` 此前还被 ark 提交白名单 400 挡在门外。
+ */
+describe('火山官方查询响应新字段(2026-09-23)', () => {
+    const cnTask = {
+        id: 'cgt-nf1',
+        tier: 'enterprise-portal',
+        user_id: 'u1',
+        model: 'seedance-2-5',
+        resolution: '480p',
+        status: 'in_progress',
+        tokens: null,
+        created_at: new Date('2026-09-23T02:00:00Z'),
+        duration: 4,
+        ratio: '16:9',
+        seed: BigInt(7),
+        generate_audio: false,
+        fail_reason: null,
+        safety_identifier: 'end-user-99',
+        output_format: 'mov',
+        tools: [{ type: 'web_search' }],
+    };
+
+    it('ark 提交:safety_identifier / output_format / tools 落库,且 tools 不再被白名单 400', async () => {
+        submitVideoWithKey.mockResolvedValue(
+            NextResponse.json({ id: 'cgt-nf0', task_id: 'cgt-nf0', status: 'queued' }),
+        );
+        const res = await handleEnterpriseArkV3(
+            req('POST', '/api/v3/contents/generations/tasks', {
+                model: 'doubao-seedance-2-5-260628',
+                content: [{ type: 'text', text: 'x' }],
+                resolution: '480p',
+                safety_identifier: 'end-user-99',
+                output_format: 'MOV',
+                tools: [{ type: 'web_search' }],
+            }),
+            '/contents/generations/tasks',
+        );
+        expect(res.status).toBe(200);
+        expect(db.seedanceVideoTask.create).toHaveBeenCalledWith({
+            data: expect.objectContaining({
+                safety_identifier: 'end-user-99',
+                output_format: 'mov',
+                tools: [{ type: 'web_search' }],
+            }),
+        });
+        // tools 也透传到了适配器(反向白名单)
+        expect(submitVideoWithKey).toHaveBeenCalledWith(
+            expect.objectContaining({ tools: [{ type: 'web_search' }] }),
+            expect.any(String),
+        );
+    });
+
+    it('ark 提交:没传这三项 → 落库 null / 省略(存量语义不变)', async () => {
+        submitVideoWithKey.mockResolvedValue(
+            NextResponse.json({ id: 'cgt-nf0', task_id: 'cgt-nf0', status: 'queued' }),
+        );
+        await handleEnterpriseArkV3(
+            req('POST', '/api/v3/contents/generations/tasks', {
+                model: 'doubao-seedance-2-5-260628',
+                content: [{ type: 'text', text: 'x' }],
+                resolution: '720p',
+            }),
+            '/contents/generations/tasks',
+        );
+        const data = (db.seedanceVideoTask.create.mock.calls[0][0] as { data: Record<string, unknown> }).data;
+        expect(data.safety_identifier).toBeNull();
+        expect(data.output_format).toBeNull();
+        expect(data.tools).toBeUndefined();
+    });
+
+    it('cn 查询(xinhankr 线,适配器不回显任何元数据)→ 新字段全部从落库值 / 官方默认值合成', async () => {
+        db.seedanceVideoTask.findUnique.mockResolvedValue(cnTask);
+        pollVideoWithKey.mockResolvedValue(
+            NextResponse.json({
+                id: 'cgt-nf1',
+                task_id: 'cgt-nf1',
+                object: 'video',
+                status: 'in_progress',
+                progress: 50,
+            }),
+        );
+        const res = await handleEnterpriseArkV3(
+            req('GET', '/api/v3/contents/generations/tasks/cgt-nf1'),
+            '/contents/generations/tasks/cgt-nf1',
+        );
+        const body = (await res.json()) as Record<string, unknown>;
+        expect(body.status).toBe('running');
+        expect(body.safety_identifier).toBe('end-user-99');
+        expect(body.output_format).toBe('mov');
+        expect(body.tools).toEqual([{ type: 'web_search' }]);
+        expect(body.service_tier).toBe('default');
+        expect(body.framespersecond).toBe(24);
+        expect(body.execution_expires_after).toBe(172800);
+        expect(body.generate_audio).toBe(false);
+        expect(body.seed).toBe(7);
+        expect(body.frames).toBe(24 * 4 + 1);
+        expect('draft' in body).toBe(false);
+        expect('upstream_id' in body).toBe(false);
+    });
+
+    it('cn 查询(2.5 480p 走 service-inference.ai,适配器带方舟元数据)→ 上游真值优先于落库值', async () => {
+        db.seedanceVideoTask.findUnique.mockResolvedValue({ ...cnTask, status: 'completed', tokens: BigInt(38830) });
+        chargeEnterpriseVideoTask.mockResolvedValue({ outcome: 'already_billed', costCny: 0 });
+        pollVideoWithKey.mockResolvedValue(
+            NextResponse.json({
+                id: 'cgt-nf1',
+                task_id: 'cgt-nf1',
+                object: 'video',
+                status: 'completed',
+                progress: 100,
+                video_url: 'https://ark-acg-cn-beijing.tos-cn-beijing.volces.com/x.mp4',
+                usage: { completion_tokens: 38830, total_tokens: 38830 },
+                duration: 4,
+                ratio: '16:9',
+                resolution: '480p',
+                framespersecond: 24,
+                generate_audio: false,
+                execution_expires_after: 172800,
+                seed: 53041,
+                upstream_created_at: 1790091874,
+                upstream_updated_at: 1790092007,
+                last_frame_url: '',
+                output_format: 'mp4',
+                safety_identifier: 'upstream-echo',
+                service_tier: 'default',
+            }),
+        );
+        const res = await handleEnterpriseArkV3(
+            req('GET', '/api/v3/contents/generations/tasks/cgt-nf1'),
+            '/contents/generations/tasks/cgt-nf1',
+        );
+        const body = (await res.json()) as Record<string, unknown>;
+        expect(body.status).toBe('succeeded');
+        expect(body.safety_identifier).toBe('upstream-echo');
+        expect(body.output_format).toBe('mp4');
+        expect(body.seed).toBe(53041);
+        expect(body.created_at).toBe(1790091874);
+        expect(body.updated_at).toBe(1790092007);
+        expect(body.frames).toBe(97);
+        expect((body.content as Record<string, unknown>).last_frame_url).toBe('');
+        expect((body.content as Record<string, unknown>).video_url).toContain('volces.com');
+    });
+
+    it('已 failed 短路 / 降级两条路也带新字段(客户契约校验不分状态)', async () => {
+        db.seedanceVideoTask.findUnique.mockResolvedValue({ ...cnTask, status: 'failed', fail_reason: '审核未通过' });
+        const res = await handleEnterpriseArkV3(
+            req('GET', '/api/v3/contents/generations/tasks/cgt-nf1'),
+            '/contents/generations/tasks/cgt-nf1',
+        );
+        const body = (await res.json()) as Record<string, unknown>;
+        expect(body.status).toBe('failed');
+        expect(body.output_format).toBe('mov');
+        expect(body.safety_identifier).toBe('end-user-99');
+        expect(body.service_tier).toBe('default');
+    });
+});

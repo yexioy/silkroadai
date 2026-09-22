@@ -329,6 +329,12 @@ export async function pollSvcinfTask(
         upstreamMeta.execution_expires_after = meta.execution_expires_after;
     if (typeof meta.seed === 'number') upstreamMeta.seed = meta.seed;
     if (Array.isArray(meta.tools)) upstreamMeta.tools = meta.tools;
+    // 2026-09 火山官方新增回显字段(实测 metadata 回显前三项;frames 上游暂未见,有则透)
+    if (typeof meta.output_format === 'string' && meta.output_format) upstreamMeta.output_format = meta.output_format;
+    if (typeof meta.safety_identifier === 'string' && meta.safety_identifier)
+        upstreamMeta.safety_identifier = meta.safety_identifier;
+    if (typeof meta.service_tier === 'string' && meta.service_tier) upstreamMeta.service_tier = meta.service_tier;
+    if (typeof meta.frames === 'number') upstreamMeta.frames = meta.frames;
     // 时间戳以上游为准(受理前无 metadata → 不带,上层据此回落库值)。
     if (typeof meta.created_at === 'number') upstreamMeta.upstream_created_at = meta.created_at;
     if (typeof meta.updated_at === 'number') upstreamMeta.upstream_updated_at = meta.updated_at;

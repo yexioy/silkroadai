@@ -44,7 +44,15 @@ import { uploadImage } from '@/lib/r2/client';
 import { randomUUID } from 'crypto';
 import { ENTERPRISE_TIER, estimateEnterpriseCostCny, chargeEnterpriseVideoTask } from './billing';
 import { AssetError, resolveAssetRefs } from './assets';
-import { normalizeArkModel, stripAssetUri, arkStatus, buildArkTaskResponse } from './ark-format';
+import {
+    normalizeArkModel,
+    stripAssetUri,
+    arkStatus,
+    buildArkTaskResponse,
+    type ArkSubmittedParams,
+    type VolcArkMeta,
+} from './ark-format';
+import type { Prisma } from '@prisma/client';
 import { maybeBrandVideoUrl } from '@/lib/seedance/volc-brand';
 import { maybeStoreVideoToCustomerOss } from '@/lib/seedance/customer-oss-video';
 import { isTerminalTaskFailure, type UpstreamErrorCategory } from '@/lib/seedance/upstream-error';
@@ -293,6 +301,7 @@ async function handleListTasks(req: NextRequest): Promise<NextResponse> {
             seed: t.seed,
             generateAudio: t.generate_audio,
             extended: region === 'global' || region === 'promax',
+            submitted: submittedArkParams(t),
         });
     });
     return NextResponse.json({ items, total, page_num: pageNum, page_size: pageSize });
@@ -433,6 +442,7 @@ const ARK_ALLOWED_FIELDS = new Set([
     'safety_identifier',
     'service_tier',
     'priority',
+    'tools', // 2026-09-23:官方创建/查询都有 tools,此前被白名单 400 挡在门外
     // 我们支持的别名/OpenAI 形入参(保留兼容,均为已知字段)
     'prompt',
     'seconds',
@@ -541,6 +551,37 @@ async function translateVolcAssetRefs(body: Record<string, unknown>): Promise<Re
     if (changed.length) console.log('[enterprise-proxy] volc 素材引用翻回上游号', { count: changed.length });
     if (inlined) console.log('[enterprise-proxy] volc 内联 base64 媒体转存 R2', { count: inlined });
     return translated;
+}
+
+/** 适配器归一 JSON 里的方舟原生元数据 → ark 响应用(volc / service-inference.ai 线有值;xinhankr 全 null)。 */
+function upstreamArkMeta(j: Record<string, unknown> | null): VolcArkMeta {
+    return {
+        framespersecond: upstreamNum(j?.framespersecond),
+        generateAudio: typeof j?.generate_audio === 'boolean' ? j.generate_audio : null,
+        executionExpiresAfter: upstreamNum(j?.execution_expires_after),
+        seed: upstreamNum(j?.seed),
+        tools: Array.isArray(j?.tools) ? j.tools : null,
+        createdAt: upstreamNum(j?.upstream_created_at),
+        updatedAt: upstreamNum(j?.upstream_updated_at),
+        lastFrameUrl: typeof j?.last_frame_url === 'string' ? j.last_frame_url : null,
+        outputFormat: upstreamStr(j?.output_format),
+        safetyIdentifier: upstreamStr(j?.safety_identifier),
+        serviceTier: upstreamStr(j?.service_tier),
+        frames: upstreamNum(j?.frames),
+    };
+}
+
+/** task 行里落库的回显参数(存量行三列 NULL → 缺省/省略)。 */
+function submittedArkParams(t: {
+    safety_identifier?: string | null;
+    output_format?: string | null;
+    tools?: unknown;
+}): ArkSubmittedParams {
+    return {
+        safetyIdentifier: t.safety_identifier ?? null,
+        outputFormat: t.output_format ?? null,
+        tools: t.tools ?? null,
+    };
 }
 
 async function handleSubmit(req: NextRequest, format: ClientFormat = 'v1'): Promise<NextResponse> {
@@ -777,6 +818,17 @@ async function handleSubmitInner(req: NextRequest, format: ClientFormat, ctx: Re
                 seed:
                     typeof body.seed === 'number' && Number.isFinite(body.seed) ? BigInt(Math.trunc(body.seed)) : null,
                 generate_audio: body.generate_audio !== false,
+                // 2026-09-23 火山官方查询响应新增回显字段:xinhankr 上游不回显,只能落库再回显
+                safety_identifier:
+                    typeof body.safety_identifier === 'string' && body.safety_identifier
+                        ? body.safety_identifier.slice(0, 64)
+                        : null,
+                output_format:
+                    typeof body.output_format === 'string' && ['mp4', 'mov'].includes(body.output_format.toLowerCase())
+                        ? body.output_format.toLowerCase()
+                        : null,
+                tools:
+                    Array.isArray(body.tools) && body.tools.length ? (body.tools as Prisma.InputJsonValue) : undefined,
             },
         });
     } catch (e) {
@@ -854,6 +906,7 @@ async function handlePollInner(
                     extended,
                     // 失败态也要出齐火山官方字段集(客户契约校验不分成功失败)。
                     volcMeta: taskRegion === 'volc' ? {} : null,
+                    submitted: submittedArkParams(task),
                 }),
             );
         }
@@ -893,6 +946,7 @@ async function handlePollInner(
                     extended,
                     // 降级路径同样要出齐字段(值走火山官方默认,上游此刻无数据)。
                     volcMeta: taskRegion === 'volc' ? {} : null,
+                    submitted: submittedArkParams(task),
                 }),
                 { headers },
             );
@@ -1082,19 +1136,11 @@ async function handlePollInner(
                 extended,
                 // volc = 原生火山:火山官方字段集要齐(客户按基准做契约校验)。
                 // 其余渠道传 null,行为逐字不变。
-                volcMeta:
-                    taskRegion === 'volc'
-                        ? {
-                              framespersecond: upstreamNum(j?.framespersecond),
-                              generateAudio: typeof j?.generate_audio === 'boolean' ? j.generate_audio : null,
-                              executionExpiresAfter: upstreamNum(j?.execution_expires_after),
-                              seed: upstreamNum(j?.seed),
-                              tools: Array.isArray(j?.tools) ? j.tools : null,
-                              createdAt: upstreamNum(j?.upstream_created_at),
-                              updatedAt: upstreamNum(j?.upstream_updated_at),
-                              lastFrameUrl: typeof j?.last_frame_url === 'string' ? j.last_frame_url : null,
-                          }
-                        : null,
+                volcMeta: taskRegion === 'volc' ? upstreamArkMeta(j) : null,
+                // cn 官方形也补齐 2026-09 新字段:国内版 2.5 480p(service-inference.ai)有上游真值,
+                // xinhankr 线全 null → 走落库提交参数 / 官方默认值。
+                upstreamMeta: taskRegion !== 'volc' ? upstreamArkMeta(j) : null,
+                submitted: submittedArkParams(task),
             }),
             { headers: vendorHeaders },
         );
