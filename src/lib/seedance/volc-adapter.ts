@@ -40,56 +40,46 @@
  *   ENTERPRISE_VOLC_WITHDRAWN_MODELS    逗号分隔的对客模型名,临时下架用(缺省空 = 四档全在售)
  */
 import 'server-only';
-import { randomBytes } from 'node:crypto';
 import { NextResponse } from 'next/server';
 import { type SeedanceVariant } from './cn-adapter';
 import { rememberVolcId, toUpstreamId } from '@/lib/enterprise/volc-id-map';
-import { passthroughUpstreamError, sanitizeUpstreamText } from './upstream-error';
+import {
+    SVCINF_DEFAULT_BASE,
+    SVCINF_KEY_PREFIX,
+    makeArkTaskId,
+    pollSvcinfTask,
+    submitSvcinfTask,
+    type SvcinfConfig,
+} from './svcinf-client';
 
-const DEFAULT_BASE = 'https://model.service-inference.ai';
-const GENERATE_PATH = '/v2/video/generate';
-const TASKS_PATH = '/v2/video/tasks';
+// 提交/轮询信封、错误拆包、失败原因脱敏 → svcinf-client.ts(cn 2.5 480p 单档也用同一上游,2026-09-22 抽出)。
+export { unwrapUpstreamError } from './svcinf-client';
 
-/** 上游 key 前缀(service-inference.ai 发的 key 形态);客户自带 key 只认这个前缀。 */
-const UPSTREAM_KEY_PREFIX = 'sk-inf-';
-const CLIENT_ID_PREFIX = 'cgt-';
+const ERR_TYPE = 'seedance_volc_adapter_error';
+const LOG = 'volc-adapter';
 
 /** category:机器可读分类,供调用方判定终态 / 瞬时(见 upstream-error.isTerminalTaskFailure)。 */
 function err(status: number, code: string, message: string, category?: string) {
     return NextResponse.json(
-        { error: { code, message, type: 'seedance_volc_adapter_error', ...(category ? { category } : {}) } },
+        { error: { code, message, type: ERR_TYPE, ...(category ? { category } : {}) } },
         { status },
     );
 }
 
-export function getVolcUpstreamConfig(overrideKey?: string): { base: string; key: string } | null {
+/** 火山渠道走 `/v2`(直传 URL 素材经 preparing 自动上传 + 支持预传句柄)。 */
+export function getVolcUpstreamConfig(overrideKey?: string): SvcinfConfig | null {
     const key = overrideKey || process.env.ENTERPRISE_VOLC_UPSTREAM_KEY;
     if (!key) return null;
-    return { base: (process.env.ENTERPRISE_VOLC_UPSTREAM_BASE_URL || DEFAULT_BASE).replace(/\/$/, ''), key };
+    return {
+        base: (process.env.ENTERPRISE_VOLC_UPSTREAM_BASE_URL || SVCINF_DEFAULT_BASE).replace(/\/$/, ''),
+        key,
+        api: 'v2',
+    };
 }
 
 /** 客户 upstream key 行里存的是真实上游 key 还是占位符?(占位 = 走平台 env key) */
 export function customerVolcUpstreamKey(upstreamKey: string | undefined | null): string | undefined {
-    return upstreamKey?.startsWith(UPSTREAM_KEY_PREFIX) ? upstreamKey : undefined;
-}
-
-/** 火山原生任务号的形态(方舟 id)。轮询侧用它判日志里的 metadata.id 落没落方舟。 */
-function isArkTaskId(v: unknown): v is string {
-    return typeof v === 'string' && v.startsWith('cgt-');
-}
-
-/**
- * 自造一个火山方舟形任务号 `cgt-YYYYMMDDHHMMSS-xxxxx`(北京时钟 + 5 位小写字母数字),
- * 形态与火山官方一致(cgt- 前缀 + 14 位时间戳 + 5 位后缀),按完整正则校验也过。
- * 与上游任何号无关联(不带上游号后缀,不泄露上游身份)。碰撞概率可忽略(秒级 + 36^5)。
- */
-const ID_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
-function makeArkTaskId(): string {
-    const d = new Date(Date.now() + 8 * 3600 * 1000); // 北京时钟(火山号用北京时间)
-    const p = (n: number) => String(n).padStart(2, '0');
-    const ts = `${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}`;
-    const suffix = Array.from(randomBytes(5), (b) => ID_ALPHABET[b % 36]).join('');
-    return `${CLIENT_ID_PREFIX}${ts}-${suffix}`;
+    return upstreamKey?.startsWith(SVCINF_KEY_PREFIX) ? upstreamKey : undefined;
 }
 
 /** 火山官方输出宽高比枚举(上游同集);非法值回落 16:9(v1 面宽松语义,ark 面 proxy 已前置 400)。 */
@@ -217,78 +207,6 @@ function buildContent(body: Record<string, unknown>): unknown[] | null {
     return null;
 }
 
-/**
- * 上游错误体 → 拆出方舟原始报错后再交 passthroughUpstreamError 脱敏 + 分类。
- *
- * 上游把方舟原错层层包进 message(实测原文):
- *   {"error":{"message":"Failed to submit video generation job: Upstream submit failed (400):
- *     {\"code\":\"fail_to_fetch_task\",\"message\":\"{\\\"error\\\":{\\\"code\\\":\\\"InvalidParameter\\\",
- *     \\\"message\\\":\\\"the parameter duration specified in the request is not valid …","type":"proxy_error"},…}
- * 且**内层常被截断**(没有闭合引号/括号)→ 不能靠 JSON.parse 逐层解;改为取最内一个
- * `"message":"` 之后的文本 + 最内一个非外壳的 `"code"`,再去转义、去尾部残渣。
- * 解不出(非嵌套的普通报错,如 `Task not found` / `Model 'x' is not available …`)则原样返回。
- */
-export function unwrapUpstreamError(text: string): string {
-    let j: Record<string, unknown> | null;
-    try {
-        j = JSON.parse(text) as Record<string, unknown>;
-    } catch {
-        return text;
-    }
-    const errObj = j?.error as Record<string, unknown> | string | undefined;
-    const msg =
-        typeof errObj === 'object' && errObj && typeof errObj.message === 'string'
-            ? errObj.message
-            : typeof errObj === 'string'
-              ? errObj
-              : typeof j?.message === 'string'
-                ? j.message
-                : '';
-    if (!msg) return text;
-    // 只有内嵌了 JSON 的才需要拆;普通一句话原样交给脱敏
-    if (!/\\*"message\\*"\s*:/.test(msg)) return text;
-
-    let inner = msg;
-    const msgRe = /\\*"message\\*"\s*:\s*\\*"/g;
-    let last: RegExpExecArray | null = null;
-    for (let m = msgRe.exec(inner); m; m = msgRe.exec(inner)) last = m;
-    if (last) inner = inner.slice(last.index + last[0].length);
-    inner = inner
-        .replace(/\\\\"/g, '"')
-        .replace(/\\"/g, '"')
-        .replace(/\\\\/g, '\\')
-        .replace(/[\\"}\]\s]+$/, '')
-        .trim();
-
-    let code = '';
-    const codeRe = /\\*"code\\*"\s*:\s*\\*"([A-Za-z0-9_.]+)\\*"/g;
-    for (let m = codeRe.exec(msg); m; m = codeRe.exec(msg)) {
-        if (m[1] !== 'fail_to_fetch_task') code = m[1];
-    }
-    // 方舟错误码并进 message(passthroughUpstreamError 只透 message):客户看到 `InvalidParameter: …` 与火山官方一致。
-    return JSON.stringify({ error: { code: code || undefined, message: code ? `${code}: ${inner}` : inner } });
-}
-
-/**
- * 失败任务的 `task.error` 字符串 → 对客文案。
- * 实测原文形如:
- *   `Reference material @Image1 could not be prepared: [Failed to download media from the provided URL.
- *    Please check if the link is accessible.] tos: request error: Message=fetch object return,
- *    RequestID=c9a5…, EC=`
- * 剥掉 TOS 内部残渣(`tos: request error: …` 整段)、方括号包装,再走 #271 通用脱敏(保留素材编号
- * `@Image1` 这类客户自己写的定位信息 —— 那不是泄露,是可操作细节)。
- */
-function cleanTaskError(raw: string): string {
-    const s = raw
-        .replace(/\s*tos:\s*request error:.*$/i, '')
-        .replace(/\bRequestID=\S+/gi, '')
-        .replace(/\bEC=\S*/g, '')
-        .replace(/\[([^\]]*)\]/g, '$1')
-        .replace(/[\s,]+$/, '')
-        .trim();
-    return sanitizeUpstreamText(s, { keepOpaqueIds: true });
-}
-
 export interface VolcSubmitOptions {
     /** 客户自己的上游 key(sk-inf-…);缺省用平台 env key。 */
     upstreamKey?: string;
@@ -364,38 +282,9 @@ export async function submitVolcVideo(body: Record<string, unknown>, opts: VolcS
     }
     if (extras.length) console.log('[volc-adapter] 透传客户额外字段', { fields: extras });
 
-    let upstream: Response;
-    try {
-        upstream = await fetch(`${cfg.base}${GENERATE_PATH}`, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${cfg.key}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify(upstreamBody),
-            signal: AbortSignal.timeout(30000),
-        });
-    } catch (e) {
-        console.warn('[volc-adapter] submit unreachable', { err: String(e) });
-        return err(502, 'upstream_unreachable', 'upstream temporarily unavailable, please retry');
-    }
-    const text = await upstream.text();
-    let j: { task?: { id?: string; status?: string }; id?: string } | null;
-    try {
-        j = JSON.parse(text) as { task?: { id?: string; status?: string }; id?: string };
-    } catch {
-        j = null;
-    }
-    const taskId = j?.task?.id ?? j?.id;
-    if (!upstream.ok || !taskId) {
-        // 上游原始报错体(含 request_id / 上游域名)只落日志;对客【透传方舟原文】(仅剥身份标记,#271)。
-        const cls = passthroughUpstreamError(unwrapUpstreamError(text), upstream.status);
-        console.warn('[volc-adapter] submit failed', {
-            model: opts.clientModel,
-            upstream_model: upstreamModel,
-            status: upstream.status,
-            category: cls.category,
-            body: text.slice(0, 2000),
-        });
-        return err(upstream.status >= 400 ? upstream.status : 502, 'upstream_error', cls.message, cls.category);
-    }
+    const r = await submitSvcinfTask(cfg, upstreamBody, { log: LOG, errType: ERR_TYPE, model: opts.clientModel });
+    if (!r.ok) return r.res;
+    const taskId = r.taskId;
     // 对客 id = 我们【即时自造】的火山方舟形任务号;上游受理号(mvt-…)是唯一可轮询句柄,
     // 存映射供轮询换回去打上游。方舟真号在轮询响应 metadata.id 里,只落日志供内部对账。
     const clientTaskId = makeArkTaskId();
@@ -413,153 +302,16 @@ export async function submitVolcVideo(body: Record<string, unknown>, opts: VolcS
     );
 }
 
-function mapStatus(s: unknown): 'queued' | 'in_progress' | 'completed' | 'failed' {
-    const x = String(s || '').toLowerCase();
-    if (['completed', 'success', 'succeeded'].includes(x)) return 'completed';
-    if (['failed', 'error', 'cancelled', 'canceled', 'expired'].includes(x)) return 'failed';
-    // preparing = 素材上传中(上游任务还没建);pending = 已提交排队。两者对客都是「排队中」。
-    if (['preparing', 'pending', 'queued'].includes(x)) return 'queued';
-    return 'in_progress';
-}
-
-/** 上游任务对象(`{task:{…}}` 信封内)。metadata = 火山方舟原生任务体(受理后才有)。 */
-interface UpstreamTask {
-    id?: unknown;
-    status?: unknown;
-    outputs?: unknown;
-    error?: unknown;
-    usage?: unknown;
-    last_frame_url?: unknown;
-    metadata?: Record<string, unknown> | null;
-}
-
 /**
- * 轮询:GET 上游任务 → 归一形 {status, video_url, last_frame_url, usage, …火山官方字段}。
+ * 轮询:GET 上游任务 → 归一形 {status, video_url, last_frame_url, usage, …火山官方字段}(见 svcinf-client)。
  * 入参 id 是对客形(cgt-X):经 volc_id_map 换回上游号(mvt-X)再打上游;查不到映射时原样打
  * (宽进 —— 上游本来就 404,由报错分支如实返回)。
  */
 export async function pollVolcVideo(id: string, upstreamKey?: string): Promise<NextResponse> {
     const cfg = getVolcUpstreamConfig(upstreamKey);
     if (!cfg) return err(503, 'temporarily_unavailable', '火山渠道未配置,请联系服务方');
-
     const upstreamId = await toUpstreamId(id);
-    let upstream: Response;
-    try {
-        upstream = await fetch(`${cfg.base}${TASKS_PATH}/${encodeURIComponent(upstreamId)}`, {
-            headers: { Authorization: `Bearer ${cfg.key}`, Accept: 'application/json' },
-            signal: AbortSignal.timeout(20000),
-        });
-    } catch (e) {
-        console.warn('[volc-adapter] poll unreachable', { id, err: String(e) });
-        return err(502, 'upstream_unreachable', 'upstream temporarily unavailable, please retry');
-    }
-    const text = await upstream.text();
-    let j: Record<string, unknown> | null;
-    try {
-        j = JSON.parse(text) as Record<string, unknown>;
-    } catch {
-        j = null;
-    }
-    // 信封:正常是 {task:{…}};防御性也认裸任务体。
-    const task = ((j?.task && typeof j.task === 'object' ? j.task : j) ?? null) as UpstreamTask | null;
-    // 带 status 的任务体 = 真·任务态(即使 HTTP 非 2xx 也按任务态处理,不当不透明错误一直挂着);
-    // 只有【没有可用 status 的纯错误体】(任务不存在 / 限流 / 5xx 无 body)才走报错分支。
-    const bodyStatus = task && typeof task.status === 'string' && task.status ? task.status : '';
-    if (!upstream.ok && !bodyStatus) {
-        const cls = passthroughUpstreamError(unwrapUpstreamError(text), upstream.status);
-        console.warn('[volc-adapter] poll failed', {
-            id,
-            status: upstream.status,
-            category: cls.category,
-            body: text.slice(0, 2000),
-        });
-        return err(upstream.status >= 400 ? upstream.status : 502, 'upstream_error', cls.message, cls.category);
-    }
-    if (!task || !bodyStatus) {
-        // 2xx 但 body 解析不出 / 没有 status(不该发生)—— 当上游暂不可用,交上层降级/重试,别当成功。
-        console.warn('[volc-adapter] poll 2xx 但 body 非任务体', { id, body: text.slice(0, 500) });
-        return err(502, 'upstream_unreachable', 'upstream temporarily unavailable, please retry');
-    }
-    if (!upstream.ok) {
-        console.warn('[volc-adapter] poll 非2xx 但 body 带 status,按任务态处理', {
-            id,
-            http: upstream.status,
-            taskStatus: bodyStatus,
-        });
-    }
-    const status = mapStatus(bodyStatus);
-    const meta = (task.metadata && typeof task.metadata === 'object' ? task.metadata : {}) as Record<string, unknown>;
-    const contentObj = (meta.content ?? undefined) as { video_url?: unknown; last_frame_url?: unknown } | undefined;
-    // 成片:方舟原生 content.video_url(火山官方 TOS 域名)优先;缺失才兜底上游 outputs[0](同一条链)。
-    const outputs = Array.isArray(task.outputs) ? task.outputs : [];
-    const videoUrl =
-        typeof contentObj?.video_url === 'string'
-            ? contentObj.video_url
-            : typeof outputs[0] === 'string'
-              ? outputs[0]
-              : undefined;
-    const lastFrameRaw =
-        typeof contentObj?.last_frame_url === 'string'
-            ? contentObj.last_frame_url
-            : typeof task.last_frame_url === 'string'
-              ? task.last_frame_url
-              : undefined;
-    // 火山成功态 content 恒有 last_frame_url(无尾帧为空串)—— 上游没要尾帧时该键缺失,由我们补空串,
-    // 「键缺失」和「值为空」对客户的契约校验是两回事。
-    const lastFrameUrl = lastFrameRaw ?? (status === 'completed' ? '' : undefined);
-
-    // 失败原因:task.error 是字符串(素材准备失败等);方舟侧失败也可能落在 metadata.error{code,message}。
-    let rawFail = '';
-    if (status === 'failed') {
-        const e = task.error;
-        const me = meta.error as { message?: unknown; code?: unknown } | undefined;
-        if (typeof e === 'string') rawFail = e;
-        else if (e && typeof e === 'object' && typeof (e as { message?: unknown }).message === 'string')
-            rawFail = (e as { message: string }).message;
-        else if (me && typeof me.message === 'string')
-            rawFail = typeof me.code === 'string' && me.code ? `${me.code}: ${me.message}` : me.message;
-    }
-    const failReason = status === 'failed' ? cleanTaskError(rawFail) || 'generation failed' : '';
-    if (failReason) console.warn('[volc-adapter] task failed upstream', { id, fail_reason: failReason, raw: rawFail });
-
-    const usage = (task.usage ?? meta.usage ?? undefined) as Record<string, unknown> | undefined;
-    // 方舟真号(metadata.id)不对客 —— 客户拿到的 `id` 是我们自造的火山方舟形号;只落日志供内部对账。
-    if (typeof meta.id === 'string' && meta.id) {
-        console.log('[volc-adapter] vendor task id', { id, vendor_task_id: meta.id, ark: isArkTaskId(meta.id) });
-    }
-    // 上游【已推导】的元数据(metadata = 方舟原生体)—— 必须优先于我们库里存的提交参数:
-    // 客户传 duration=-1(智能时长)时完成态会给模型真正选的秒数;ratio 同理。
-    const upstreamMeta: Record<string, unknown> = {};
-    if (typeof meta.duration === 'number') upstreamMeta.duration = meta.duration;
-    if (typeof meta.ratio === 'string' && meta.ratio) upstreamMeta.ratio = meta.ratio;
-    if (typeof meta.resolution === 'string' && meta.resolution) upstreamMeta.resolution = meta.resolution;
-    // 火山官方字段集里客户会做契约校验的几项(2026-08-27 客户报障:我们一个没给)。
-    if (typeof meta.framespersecond === 'number') upstreamMeta.framespersecond = meta.framespersecond;
-    if (typeof meta.generate_audio === 'boolean') upstreamMeta.generate_audio = meta.generate_audio;
-    if (typeof meta.execution_expires_after === 'number')
-        upstreamMeta.execution_expires_after = meta.execution_expires_after;
-    if (typeof meta.seed === 'number') upstreamMeta.seed = meta.seed;
-    if (Array.isArray(meta.tools)) upstreamMeta.tools = meta.tools;
-    // 时间戳以上游为准(受理前无 metadata → 不带,上层据此回落库值)。
-    if (typeof meta.created_at === 'number') upstreamMeta.upstream_created_at = meta.created_at;
-    if (typeof meta.updated_at === 'number') upstreamMeta.upstream_updated_at = meta.updated_at;
-    if (lastFrameUrl !== undefined) upstreamMeta.last_frame_url = lastFrameUrl;
-
-    return NextResponse.json(
-        {
-            id,
-            task_id: id,
-            object: 'video',
-            status,
-            progress: status === 'completed' || status === 'failed' ? 100 : 50,
-            video_url: videoUrl,
-            url: videoUrl,
-            fail_reason: failReason || undefined,
-            usage: status === 'completed' ? usage : undefined,
-            ...upstreamMeta,
-        },
-        { status: 200 },
-    );
+    return pollSvcinfTask(cfg, id, upstreamId, { log: LOG, errType: ERR_TYPE });
 }
 
 /** 取消任务:上游【无取消/删除端点】(文档只有建/查/列三条)。

@@ -22,6 +22,16 @@ import { NextRequest, NextResponse } from 'next/server';
 import { randomUUID } from 'node:crypto';
 import { uploadImage } from '@/lib/r2/client';
 import { classifyUpstreamError } from './upstream-error';
+import { rememberVolcId, toUpstreamId } from '@/lib/enterprise/volc-id-map';
+import {
+    SVCINF_DEFAULT_BASE,
+    isSvcinfTaskId,
+    makeArkTaskId,
+    pollSvcinfTask,
+    submitSvcinfTask,
+    type SvcinfApiVersion,
+    type SvcinfConfig,
+} from './svcinf-client';
 
 const XHK_BASE = process.env.SEEDANCE_XHK_BASE_URL || 'https://token.xinhankr.com';
 /** 上游 pro 模型名(SEEDANCE_XHK_MODEL 仅覆盖 pro;fast/mini 上游 id 固定)。 */
@@ -58,6 +68,17 @@ const UPSTREAM_XHK_25 = process.env.SEEDANCE_XHK_MODEL_25 || 'artsdance-2-5-pro-
 // 720p 却 100% 稳),doubao-seedance-2-5-260628 @480p 是 28/28 全稳(含 audio=false)——
 // 同一底模,doubao- 名路由到全支持 480p 的稳定后端。720p/1080p 仍走 pro 版 260801。
 const UPSTREAM_XHK_25_480P = process.env.SEEDANCE_XHK_MODEL_25_480P || 'doubao-seedance-2-5-260628';
+// 2026-09-22 起 480p 单档改走 service-inference.ai(operator 拍板,与火山渠道同一家上游、独立 key):
+// 上游模型名 `doubao-seedance-2-5-260628-max`(本平台套餐形态,GET /v1/models 为准),协议见 svcinf-client。
+// 只有配了 SEEDANCE_SVCINF_KEY 才切;未配回落上面的 xinhankr 260628(部署缺 env 不断档)。
+const UPSTREAM_SVCINF_25_480P = process.env.SEEDANCE_SVCINF_MODEL_25_480P || 'doubao-seedance-2-5-260628-max';
+/** 国内版 2.5 480p 的 service-inference.ai 配置(lazy 读 env,便于改 key 不重启 + 可测);未配 → null。 */
+export function getSvcinfCnConfig(): SvcinfConfig | null {
+    const key = process.env.SEEDANCE_SVCINF_KEY?.trim();
+    if (!key) return null;
+    const api: SvcinfApiVersion = process.env.SEEDANCE_SVCINF_API_VERSION === 'v2' ? 'v2' : 'v1';
+    return { base: (process.env.SEEDANCE_SVCINF_BASE_URL || SVCINF_DEFAULT_BASE).replace(/\/$/, ''), key, api };
+}
 
 /** 版本 → 上游 base URL(global 与 promax 同为 intl 端口,仅模型名/费率不同)。
  *  volc(火山渠道)走独立上游 + 火山方舟原生协议,不经此函数(见 volc-adapter)。 */
@@ -108,6 +129,10 @@ export interface SeedanceModelSpec {
     upstream: string;
     /** 版本:缺省 'cn';'global' 走海外 base(INTL_BASE)。 */
     region?: SeedanceRegion;
+    /** 'svcinf' = 该档走 service-inference.ai(配了 SEEDANCE_SVCINF_KEY 时);缺省走 region 对应的 xinhankr/intl base。 */
+    provider?: 'svcinf';
+    /** provider='svcinf' 时发给 service-inference.ai 的模型名(`upstream` 仍是未配 key 时的回落模型)。 */
+    svcinfModel?: string;
 }
 
 /** 客户/new-api 档位模型名 → 档位规格(每档 × {无参考,-ref} 两名)。2k 已下线(2026-07-15)。
@@ -131,8 +156,8 @@ export const MODEL_MAP: Record<string, SeedanceModelSpec> = {
             ),
         ),
     ),
-    // ── 国内 seedance 2.5(cn):费率独立;720p/1080p 走 pro 版 260801,480p 走 doubao-260628
-    //    (pro 版拒 480p;480p 用 doubao- 名走稳定后端,见 UPSTREAM_XHK_25_480P 注释)──
+    // ── 国内 seedance 2.5(cn):费率独立;720p/1080p 走 pro 版 260801;480p 走 service-inference.ai
+    //    (2026-09-22 起,未配 key 回落 xinhankr doubao-260628,见 UPSTREAM_XHK_25_480P / getSvcinfCnConfig)──
     ...Object.fromEntries(
         (['480p', '720p', '1080p'] as const).flatMap((resolution) =>
             [false, true].map((ref) => [
@@ -142,6 +167,10 @@ export const MODEL_MAP: Record<string, SeedanceModelSpec> = {
                     ref,
                     variant: '2.5' as const,
                     upstream: resolution === '480p' ? UPSTREAM_XHK_25_480P : UPSTREAM_XHK_25,
+                    // 480p 单档 2026-09-22 起走 service-inference.ai(有 key 才切,见 getSvcinfCnConfig)
+                    ...(resolution === '480p'
+                        ? { provider: 'svcinf' as const, svcinfModel: UPSTREAM_SVCINF_25_480P }
+                        : {}),
                 },
             ]),
         ),
@@ -657,6 +686,45 @@ export async function submitVideoWithKey(body: Record<string, unknown>, auth: st
         genAudio: generateAudio,
     });
 
+    // 2.5 480p 单档 → service-inference.ai(平台 key,不用客户/渠道的 xinhankr key)。
+    // 只翻译 body 形态(prompt + images/videos/audios → 方舟 content 数组),其余字段原样;
+    // 对客 id 自造火山方舟形号 + volc_id_map 记映射(上游受理号 mvt-),轮询按映射分流。
+    const svc = map.provider === 'svcinf' ? getSvcinfCnConfig() : null;
+    if (svc) {
+        const content: Array<Record<string, unknown>> = [{ type: 'text', text: prompt }];
+        for (const im of (upstreamBody.images as Array<{ url: string; role: string }> | undefined) ?? [])
+            content.push({ type: 'image_url', image_url: { url: im.url }, role: im.role });
+        for (const v of (upstreamBody.videos as string[] | undefined) ?? [])
+            content.push({ type: 'video_url', video_url: { url: v }, role: 'reference_video' });
+        for (const a of (upstreamBody.audios as string[] | undefined) ?? [])
+            content.push({ type: 'audio_url', audio_url: { url: a }, role: 'reference_audio' });
+        const svcBody: Record<string, unknown> = { ...upstreamBody, model: map.svcinfModel ?? map.upstream, content };
+        delete svcBody.prompt;
+        delete svcBody.images;
+        delete svcBody.videos;
+        delete svcBody.audios;
+        const r = await submitSvcinfTask(svc, svcBody, {
+            log: 'seedance-cn-adapter',
+            errType: 'seedance_cn_adapter_error',
+            model,
+        });
+        if (!r.ok) return r.res;
+        const clientTaskId = makeArkTaskId();
+        await rememberVolcId(clientTaskId, r.taskId, 'task');
+        return NextResponse.json(
+            {
+                id: clientTaskId,
+                task_id: clientTaskId,
+                object: 'video',
+                model,
+                status: 'queued',
+                progress: 0,
+                created_at: Math.floor(Date.now() / 1000),
+            },
+            { status: 200 },
+        );
+    }
+
     const upstreamBase = baseForRegion(map.region ?? 'cn');
     let upstream: Response;
     try {
@@ -735,6 +803,13 @@ export async function pollVideo(req: NextRequest, id: string): Promise<NextRespo
  *  尽力而为——上游支持则真取消排队任务;不支持/报错由调用方决定不阻断客户,且绝不透传上游 body(#271)。
  *  返回原始 upstream Response(调用方一般只看是否 2xx)。 */
 export async function cancelVideoWithKey(id: string, auth: string, region: SeedanceRegion = 'cn'): Promise<Response> {
+    // service-inference.ai 任务(2.5 480p):上游无取消端点 → 合成 501,调用方 best-effort 不阻断。
+    if (isSvcinfTaskId(await toUpstreamId(id))) {
+        return new Response(JSON.stringify({ error: { code: 'not_supported', message: 'cancel not supported' } }), {
+            status: 501,
+            headers: { 'Content-Type': 'application/json' },
+        });
+    }
     return fetchXhk(
         `/v1/video/generations/${encodeURIComponent(id)}`,
         auth,
@@ -745,6 +820,14 @@ export async function cancelVideoWithKey(id: string, auth: string, region: Seeda
 
 /** 轮询核心(独立门户直调:id + 上游 key 授权头;region 决定打哪个 base,缺省国内)。 */
 export async function pollVideoWithKey(id: string, auth: string, region: SeedanceRegion = 'cn'): Promise<NextResponse> {
+    // 2.5 480p(service-inference.ai)任务:对客号 → volc_id_map → 上游 mvt- 号 → 平台 key 轮询。
+    // 查不到映射 / 非 mvt- → 存量 xinhankr 任务,照旧。（每次轮询 +1 次主键查表,可接受。）
+    const mapped = await toUpstreamId(id);
+    if (isSvcinfTaskId(mapped)) {
+        const svc = getSvcinfCnConfig();
+        if (!svc) return err(503, 'temporarily_unavailable', 'seedance 2.5 480p 上游未配置,请联系服务方');
+        return pollSvcinfTask(svc, id, mapped, { log: 'seedance-cn-adapter', errType: 'seedance_cn_adapter_error' });
+    }
     let upstream: Response;
     try {
         upstream = await fetchXhk(`/v1/video/generations/${encodeURIComponent(id)}`, auth, {}, baseForRegion(region));
