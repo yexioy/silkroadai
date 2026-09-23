@@ -727,6 +727,62 @@ describe('归一短名(2026-07-20)', () => {
         expect(pollVideoWithKey).not.toHaveBeenCalled();
     });
 
+    it('AK/SK 账号级轮询 volc 任务:客户 volc 行是真实 sk-inf- key → 按 volc 补加载并传给 pollVolcVideo(与提交一致)', async () => {
+        // 2026-09-23 北京独立系统首日:客户用 AK/SK 提交 volc 任务,提交路径按模型渠道装载了客户的
+        // volc 行(真实 sk-inf- key,任务建在客户自己的 service-inference 账号下);轮询路径 AK/SK
+        // 的 cust.upstreamKey='' 且原代码只对非 volc 补加载 → 回落平台 env key → 上游 404 Task not found。
+        resolveEnterpriseAuth.mockResolvedValue({
+            ok: true,
+            customer: { ...CUSTOMER, region: 'cn', upstreamKey: '', accountLevel: true },
+        });
+        getUpstreamKeyForUser.mockResolvedValueOnce('sk-inf-v1-customer-own-account');
+        db.seedanceVideoTask.findUnique.mockResolvedValue({
+            id: 'task_v10',
+            user_id: 'u1',
+            tier: 'enterprise-portal',
+            model: 'doubao-seedance-2.5',
+            tokens: null,
+            status: 'queued',
+        });
+        pollVolcVideo.mockResolvedValue(NextResponse.json({ id: 'task_v10', status: 'in_progress', progress: 50 }));
+        const res = await handleEnterpriseV1(
+            req('GET', '/v1/video/generations/task_v10'),
+            '/video/generations/task_v10',
+        );
+        expect(res.status).toBe(200);
+        expect(getUpstreamKeyForUser).toHaveBeenCalledWith('u1', 'volc');
+        expect(pollVolcVideo).toHaveBeenCalledWith('task_v10', 'sk-inf-v1-customer-own-account');
+        expect(pollVideoWithKey).not.toHaveBeenCalled();
+    });
+
+    it('AK/SK 账号级轮询 volc 任务:客户 volc 行是占位符或缺失 → 仍回落平台 env key(undefined),不 503', async () => {
+        resolveEnterpriseAuth.mockResolvedValue({
+            ok: true,
+            customer: { ...CUSTOMER, region: 'cn', upstreamKey: '', accountLevel: true },
+        });
+        // 两个不同 task id:轮询有短 TTL 缓存(同任务合流),同 id 第二次不会再打上游
+        const cases: Array<[string, string | null]> = [
+            ['task_v11', 'platform-shared-key'],
+            ['task_v12', null],
+        ];
+        for (const [id, stored] of cases) {
+            db.seedanceVideoTask.findUnique.mockResolvedValue({
+                id,
+                user_id: 'u1',
+                tier: 'enterprise-portal',
+                model: 'doubao-seedance-2.5',
+                tokens: null,
+                status: 'queued',
+            });
+            pollVolcVideo.mockResolvedValue(NextResponse.json({ id, status: 'in_progress', progress: 50 }));
+            getUpstreamKeyForUser.mockResolvedValueOnce(stored);
+            pollVolcVideo.mockClear();
+            const res = await handleEnterpriseV1(req('GET', `/v1/video/generations/${id}`), `/video/generations/${id}`);
+            expect(res.status).toBe(200);
+            expect(pollVolcVideo).toHaveBeenCalledWith(id, undefined);
+        }
+    });
+
     it('AK/SK 账号级轮询非 volc 任务:无版本门 + 按【任务 region】补加载上游 key(修 #294 回归)', async () => {
         // AK/SK 账号级:accountLevel=true,region 名义 'cn',upstreamKey='' (/api 未装载)
         resolveEnterpriseAuth.mockResolvedValue({
@@ -1892,6 +1948,50 @@ describe('火山官方查询响应新字段(2026-09-23)', () => {
         );
     });
 
+    it('ark 提交:execution_expires_after / bitrate_mode / moderation_options 不再 400(客户 2026-09-23 实测被拒);expires 落库并在查询回显', async () => {
+        submitVideoWithKey.mockResolvedValue(
+            NextResponse.json({ id: 'cgt-nf2', task_id: 'cgt-nf2', status: 'queued' }),
+        );
+        const res = await handleEnterpriseArkV3(
+            req('POST', '/api/v3/contents/generations/tasks', {
+                model: 'seedance-2-5',
+                content: [{ type: 'text', text: '清晨城市公园' }],
+                resolution: '720p',
+                duration: 4,
+                ratio: '16:9',
+                execution_expires_after: 3600,
+                bitrate_mode: 'vbr',
+                moderation_options: { ips: ['ip-1'] },
+            }),
+            '/contents/generations/tasks',
+        );
+        expect(res.status).toBe(200);
+        expect(db.seedanceVideoTask.create).toHaveBeenCalledWith({
+            data: expect.objectContaining({ execution_expires_after: 3600 }),
+        });
+        // 透传到适配器(cn-adapter 反向白名单再转上游)
+        expect(submitVideoWithKey).toHaveBeenCalledWith(
+            expect.objectContaining({ execution_expires_after: 3600, bitrate_mode: 'vbr' }),
+            expect.any(String),
+        );
+        // 查询回显客户传的阈值,而不是官方默认 172800
+        db.seedanceVideoTask.findUnique.mockResolvedValue({ ...cnTask, id: 'cgt-nf2', execution_expires_after: 3600 });
+        pollVideoWithKey.mockResolvedValue(
+            NextResponse.json({
+                id: 'cgt-nf2',
+                task_id: 'cgt-nf2',
+                object: 'video',
+                status: 'in_progress',
+                progress: 50,
+            }),
+        );
+        const q = await handleEnterpriseArkV3(
+            req('GET', '/api/v3/contents/generations/tasks/cgt-nf2'),
+            '/contents/generations/tasks/cgt-nf2',
+        );
+        expect(((await q.json()) as Record<string, unknown>).execution_expires_after).toBe(3600);
+    });
+
     it('ark 提交:没传这三项 → 落库 null / 省略(存量语义不变)', async () => {
         submitVideoWithKey.mockResolvedValue(
             NextResponse.json({ id: 'cgt-nf0', task_id: 'cgt-nf0', status: 'queued' }),
@@ -1908,6 +2008,7 @@ describe('火山官方查询响应新字段(2026-09-23)', () => {
         expect(data.safety_identifier).toBeNull();
         expect(data.output_format).toBeNull();
         expect(data.tools).toBeUndefined();
+        expect(data.execution_expires_after).toBeNull();
     });
 
     it('cn 查询(xinhankr 线,适配器不回显任何元数据)→ 新字段全部从落库值 / 官方默认值合成', async () => {

@@ -180,6 +180,16 @@ describe('buildArkTaskResponse', () => {
         expect(r.output_format).toBe('mov');
         expect(r.tools).toEqual([{ type: 'web_search' }]);
         expect('frames' in r).toBe(false);
+        // execution_expires_after:客户传了回显客户值(官方创建参数),没传给官方默认
+        const withExp = buildArkTaskResponse({
+            taskId: 'cgt-1e',
+            internalModel: 'seedance-2-5',
+            status: 'running',
+            createdAt,
+            submitted: { executionExpiresAfter: 3600 },
+        });
+        expect(withExp.execution_expires_after).toBe(3600);
+        expect(r.execution_expires_after).toBe(172800);
         // 存量行三列 NULL → 缺省 mp4、省略 safety_identifier/tools
         const old = buildArkTaskResponse({
             taskId: 'cgt-1c',

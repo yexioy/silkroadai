@@ -443,6 +443,9 @@ const ARK_ALLOWED_FIELDS = new Set([
     'service_tier',
     'priority',
     'tools', // 2026-09-23:官方创建/查询都有 tools,此前被白名单 400 挡在门外
+    'execution_expires_after', // 2026-09-23:官方创建参数(任务超时阈值),客户实测被 400
+    'bitrate_mode', // 火山官方字段(2026-08-26 实测上游收),v1 面早已透传,ark 面补齐
+    'moderation_options', // 火山官方(版权放行 ips);volc 透 ips、cn 暂消费掉,但不该 400
     // 我们支持的别名/OpenAI 形入参(保留兼容,均为已知字段)
     'prompt',
     'seconds',
@@ -576,11 +579,13 @@ function submittedArkParams(t: {
     safety_identifier?: string | null;
     output_format?: string | null;
     tools?: unknown;
+    execution_expires_after?: number | null;
 }): ArkSubmittedParams {
     return {
         safetyIdentifier: t.safety_identifier ?? null,
         outputFormat: t.output_format ?? null,
         tools: t.tools ?? null,
+        executionExpiresAfter: t.execution_expires_after ?? null,
     };
 }
 
@@ -829,6 +834,10 @@ async function handleSubmitInner(req: NextRequest, format: ClientFormat, ctx: Re
                         : null,
                 tools:
                     Array.isArray(body.tools) && body.tools.length ? (body.tools as Prisma.InputJsonValue) : undefined,
+                execution_expires_after:
+                    typeof body.execution_expires_after === 'number' && Number.isInteger(body.execution_expires_after)
+                        ? body.execution_expires_after
+                        : null,
             },
         });
     } catch (e) {
@@ -964,13 +973,21 @@ async function handlePollInner(
         return failedResponse(task.fail_reason || 'generation failed');
     }
 
-    // 非 volc 轮询要打客户上游:sk-ent 用鉴权时装载的 cust.upstreamKey;AK/SK 账号级(/api 轮询
+    // 轮询要打客户上游:sk-ent 用鉴权时装载的 cust.upstreamKey;AK/SK 账号级(/api 轮询
     // 未按 region 装载,cust.upstreamKey='')→ 按【任务的 region】补加载客户上游 key。
+    // ⚠️ volc 也必须补加载(2026-09-23 修):提交路径按模型渠道装载了客户的 volc 行 —— 若客户行是
+    // 真实 sk-inf- key(自带 service-inference 账号),任务建在客户账号下;轮询若不补加载就回落
+    // 平台 env key → 上游「Task not found」404 永远查不到(北京独立系统首日客户实测)。
+    // 客户行是占位符时 customerVolcUpstreamKey 仍回落平台 key,行为不变。
     let upstreamKey = cust.upstreamKey;
-    if (taskRegion !== 'volc' && cust.accountLevel) {
+    if (cust.accountLevel) {
         const k = await getUpstreamKeyForUser(cust.userId, taskRegion);
-        if (!k) return errJson(503, 'account_not_configured', 'no upstream key configured for this region');
-        upstreamKey = k;
+        if (taskRegion !== 'volc') {
+            if (!k) return errJson(503, 'account_not_configured', 'no upstream key configured for this region');
+            upstreamKey = k;
+        } else {
+            upstreamKey = k ?? '';
+        }
     }
 
     // 短 TTL 缓存 + 同任务并发合流:客户的轮询频率不再 1:1 传导到上游(见 poll-cache 头部)。
@@ -980,7 +997,7 @@ async function handlePollInner(
     const { result: upstream, cached } = await pollWithCache(taskId, async () => {
         const r =
             taskRegion === 'volc'
-                ? await pollVolcVideo(taskId, customerVolcUpstreamKey(cust.upstreamKey))
+                ? await pollVolcVideo(taskId, customerVolcUpstreamKey(upstreamKey))
                 : await pollVideoWithKey(taskId, `Bearer ${upstreamKey}`, taskRegion);
         return { status: r.status, text: await r.text() };
     });
