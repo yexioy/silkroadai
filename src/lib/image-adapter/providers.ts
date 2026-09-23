@@ -249,4 +249,56 @@ export const IMAGE_PROVIDERS: Record<string, ImageProvider> = {
         brand: /\bllmway\b|\bdistributor\b|64\.32\.31\.178/gi,
         openAllTiers: true,
     },
+    // ---- junze / junzestable(钧泽 API,ai.junze.me)2026-09-24 接入,【紧急备用线】----
+    // 定位:operator 2026-09-24 拍板 —— 两条渠道【先建停用】(status=2),只在现有 image2 主力线
+    // (ch176/177/178/186/201/202 等)全挂时手工启用兜底。因此【不设 gateMinCt 守门线】:备用线的
+    // 价值是"什么都能接住",宁可低档亏钱也不能把客户请求拒成 503 —— 同 ominiapifull / oaidistfull /
+    // pandatk 那批 openAllTiers 兜底线的定位。启用期间低档是亏的(见下方成本表),按天盯着,主力恢复即停。
+    //
+    // 【成本】按张固定,与 size / quality / 档位全无关(权威来源:上游 `GET /api/log/token?key=sk-xxx`
+    // 带 `Authorization: sk-xxx`,逐条 quota ÷ quota_per_unit 500,000):
+    //   - junze       key sk-Wwqj…yXp0 → **$0.03/张 = ¥0.216**(汇率 7.2)
+    //   - junzestable key sk-Ce6A…y03Q → **$0.045/张 = ¥0.324**(贵 50%,上游承诺"稳定不断";
+    //     两 key 同上游同契约,逐项实测一致:1024²/4K token 值、Firefly 主机、quality 行为全同
+    //     → 只有"更稳"这一个卖点,主力备用选 junze,junze 也不行时再上 junzestable)
+    //   `n>1` 按张收(n=2 = 2×单价);内容安全 451 不计费。
+    // 【盈亏(售价 = 合成 ct × 3.9e-5,见 MIN_SYNTH_CT 注释的换算)】能覆盖 junze ¥0.216 成本的只有
+    //   1024² high(7,024→¥0.274 +27%)/2560×1440 high(7,370→¥0.287)/4K high(13,342→¥0.520)/
+    //   2048² high(14,272→¥0.557)/2880² high(23,718→¥0.925);**全部 medium/low 档亏**
+    //   (medium 天花板 2880²=5,930→¥0.231 勉强打平,1024² medium 仅 ¥0.068 vs 成本 ¥0.216)。
+    //   junzestable 再往上抬一档:1024² high / 2560×1440 high 也亏。**这是备用线的既定代价。**
+    // 【上游身份】Adobe Firefly Services 转售 OpenAI —— 出图 C2PA claim = `OpenAI Media Service API`
+    // (OpenAI OpCo 证书链,SSL.com C2PA ICA),但分发主机是 `pre-signed-firefly-prod.s3-accelerate
+    // .amazonaws.com` 预签名 url(X-Amz-Expires=86400 → 24h 过期,适配器 url→b64 拉回,绝不外泄)。
+    // C2PA 由适配器按内容剥(#440,命中 adobe/firefly 才剥;本家 claim 是 OpenAI 官方内容凭证,
+    // 与 revefull 同理【正确放行】)。另带 `c2pa.watermarked.unbound` 隐形水印(官方出图本就有)。
+    // 【⚠️ quality 钉死 medium 刻度】low/medium/high 三种请求上游一律回 `quality:"medium"`,
+    // 自报 out_tokens:1024²=1056、1536×1024=1568、2048²=1584、2560×1440=2352、3840×2160=3336
+    // —— 4K 那个 3336 正好是官方 **medium** 公式值(high 应 13,342)→ 上游【拿不到 high 档渲染】。
+    // 同站的 `gpt-image-high`($0.08/张)实测同样是 medium 刻度(1024²=1756 / 4K=3336),不是 high 专线,
+    // 且带 quality 参数会 400 `Invalid free model` → 不接,upstreamModel 保持裸 gpt-image-2。
+    // 适配器计费按【客户请求的 quality】+ 返回图实际尺寸合成官方账单(全 provider 通用)→ 启用期间
+    // high 档客户按 high 计费但拿 medium 渲染。**这是 operator 知情接受的应急取舍**(备用线短暂启用,
+    // 优于全站出图失败);若某天要改成诚实按 medium 收,把 openAllTiers 换成
+    // onlyQualities: ['medium'] 一行即可(同 frimodelmedium 先例)。
+    // 【尺寸】1024²/1536×1024/1024×1536/2048²/2560×1440/3840×2160 逐像素如实;**方图上限 2880²**
+    // (3072²/3840² 静默降到 2880²)—— openAllTiers 按返回图实际尺寸计费 → 降级只少收不超收,安全。
+    // `size:"auto"` 与【不传 size】→ 2048×2048(非官方缺省),auto-size 归一层已统一处理。
+    // 【其余实测】generations / edits multipart / 多参考图 image[] / mask / response_format=b64_json
+    // 全支持;12 并发 12/12 成功、p50 39s(单发 38-70s,12 并发 95-112s);451 文案
+    // `Try modifying the prompts or the seeds`(非官方措辞,#379 内容安全分类已覆盖 `appear to be unsafe`);
+    // 503 错误体含 `under group default (distributor)` → brand 兜 distributor。
+    // 透明背景未验证 → fail-closed 拒(家族惯例;openAllTiers 不豁免这条)。
+    junze: {
+        baseUrl: 'https://ai.junze.me',
+        brand: /\bjun-?ze\b|\bdistributor\b|\bfirefly\b|\bs3-accelerate\.amazonaws\.com\b/gi,
+        openAllTiers: true,
+        noTransparentBackground: true,
+    },
+    junzestable: {
+        baseUrl: 'https://ai.junze.me',
+        brand: /\bjun-?ze\b|\bdistributor\b|\bfirefly\b|\bs3-accelerate\.amazonaws\.com\b/gi,
+        openAllTiers: true,
+        noTransparentBackground: true,
+    },
 };

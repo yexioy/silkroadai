@@ -2586,3 +2586,119 @@ describe('frimodelhigh provider(frimodel 第四账号,onlyQualities=[high] + gpt
         expect(lc).not.toContain('s3-accelerate');
     });
 });
+
+describe('junze / junzestable provider(钧泽 API,Firefly 转售,openAllTiers 紧急备用线)', () => {
+    const URL_JUNZE = 'http://portal.test/image-adapter/junze/v1/images/generations';
+    const URL_STABLE = 'http://portal.test/image-adapter/junzestable/v1/images/generations';
+
+    it('路由到 ai.junze.me,key 透传,model 裸 gpt-image-2 + 显式 b64_json', async () => {
+        okUpstream();
+        const res = await handleAdapterImage(
+            jsonReq(URL_JUNZE, { model: 'gpt-image-2', prompt: 'x', size: '1024x1024', quality: 'high' }),
+            'generations',
+            'junze',
+        );
+        expect(res.status).toBe(200);
+        const [url, init] = fetchMock.mock.calls[0];
+        expect(url).toBe('https://ai.junze.me/v1/images/generations');
+        expect(init.headers.authorization).toBe('Bearer sk-upstream-test');
+        const sent = JSON.parse(init.body as string);
+        expect(sent.model).toBe('gpt-image-2'); // 上游认裸名,无 upstreamModel 覆盖
+        expect(sent.response_format).toBe('b64_json');
+    });
+
+    // 【备用线的核心契约】无 gateMinCt —— 主力全挂时什么都得接住,亏钱档也放行,
+    // 绝不能因为守门把客户请求拒成 503(operator 2026-09-24 明确要求)。
+    it.each([
+        ['1024² low(196,亏)', { size: '1024x1024', quality: 'low' }],
+        ['1024² medium(1,756,亏)', { size: '1024x1024', quality: 'medium' }],
+        ['1536×1024 high(5,488,亏)', { size: '1536x1024', quality: 'high' }],
+        ['1024² 缺省 quality(→low,亏)', { size: '1024x1024' }],
+        ['size=auto(gateMinCt 线会拒,备用线必须接)', { size: 'auto' }],
+        ['1024² high(7,024,赚)', { size: '1024x1024', quality: 'high' }],
+        ['4K high(13,342,赚)', { size: '3840x2160', quality: 'high' }],
+    ])('junze 全量放行(含亏钱档):%s', async (_label, extra) => {
+        okUpstream();
+        const res = await handleAdapterImage(
+            jsonReq(URL_JUNZE, { model: 'gpt-image-2', prompt: 'x', ...extra }),
+            'generations',
+            'junze',
+        );
+        expect(res.status).toBe(200);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('junzestable 同为全量线(贵 50%,只在 junze 也不行时启用),同上游同契约', async () => {
+        okUpstream();
+        const res = await handleAdapterImage(
+            jsonReq(URL_STABLE, { model: 'gpt-image-2', prompt: 'x', size: '1024x1024', quality: 'low' }),
+            'generations',
+            'junzestable',
+        );
+        expect(res.status).toBe(200);
+        expect(fetchMock.mock.calls[0][0]).toBe('https://ai.junze.me/v1/images/generations');
+    });
+
+    it('计费按【客户请求的 quality】+ 返回图实际尺寸(1024² high = 7,024)', async () => {
+        fetchMock.mockImplementation(
+            async () =>
+                new Response(JSON.stringify({ created: 1, data: [{ b64_json: pngB64(1024, 1024) }] }), {
+                    status: 200,
+                    headers: { 'content-type': 'application/json' },
+                }),
+        );
+        const res = await handleAdapterImage(
+            jsonReq(URL_JUNZE, { model: 'gpt-image-2', prompt: 'x', size: '1024x1024', quality: 'high' }),
+            'generations',
+            'junze',
+        );
+        expect((await res.json()).usage.output_tokens).toBe(officialOutputTokens(1024, 1024, 'high'));
+    });
+
+    it('方图静默降级(请求 3840² → 上游封顶 2880²)按【返回图实际尺寸】计费,不按请求值超收', async () => {
+        // 2026-09-24 实测:3072²/3840² 都被上游降到 2880²。
+        fetchMock.mockImplementation(
+            async () =>
+                new Response(JSON.stringify({ created: 1, data: [{ b64_json: pngB64(2880, 2880) }] }), {
+                    status: 200,
+                    headers: { 'content-type': 'application/json' },
+                }),
+        );
+        const res = await handleAdapterImage(
+            jsonReq(URL_JUNZE, { model: 'gpt-image-2', prompt: 'x', size: '3840x3840', quality: 'high' }),
+            'generations',
+            'junze',
+        );
+        expect(res.status).toBe(200);
+        expect((await res.json()).usage.output_tokens).toBe(officialOutputTokens(2880, 2880, 'high'));
+    });
+
+    it('透明背景 fail-closed:openAllTiers 不豁免这条 → 仍 503 不打上游', async () => {
+        const res = await handleAdapterImage(
+            jsonReq(URL_JUNZE, {
+                model: 'gpt-image-2',
+                prompt: 'x',
+                size: '1024x1024',
+                quality: 'high',
+                background: 'transparent',
+            }),
+            'generations',
+            'junze',
+        );
+        expect(res.status).toBe(503);
+        expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('brand 正则抹掉 junze / distributor / firefly / s3-accelerate', () => {
+        const out = sanitizeAdapterError(
+            'ai.junze.me: No available channel for model gpt-image-9 under group default (distributor); ' +
+                'image from pre-signed-firefly-prod.s3-accelerate.amazonaws.com',
+            /\bjun-?ze\b|\bdistributor\b|\bfirefly\b|\bs3-accelerate\.amazonaws\.com\b/gi,
+        );
+        const lc = out.toLowerCase();
+        expect(lc).not.toContain('junze');
+        expect(lc).not.toContain('distributor');
+        expect(lc).not.toContain('firefly');
+        expect(lc).not.toContain('s3-accelerate');
+    });
+});
