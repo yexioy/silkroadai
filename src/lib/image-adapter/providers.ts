@@ -212,6 +212,19 @@ export const IMAGE_PROVIDERS: Record<string, ImageProvider> = {
         onlyQualities: ['high'],
         noTransparentBackground: true,
     },
+    // revefull:reve.amlkcloud.top 同一上游 + 同一 key 的【全量】线(镜像 revehigh,openAllTiers)。
+    // 2026-09-23 实测:上游是【混合池】——high 档干净(无 C2PA,见 revehigh),但 **low/medium/auto 走
+    // Adobe Firefly**(出图带 adobe C2PA)→ 由适配器内容自定向 C2PA 剥离(#440)统一处理,不外泄。
+    // ⚠️【low/medium 大尺寸静默降级】:low 1536×1024 → 实交 1264×848、medium 2048² → 实交 1536²
+    // (high 档才尺寸全如实);openAllTiers 计费一律按【返回图实际尺寸】合成官方公式(imageDimensions
+    // 解 JPEG SOF)→ 降级只少收不超收,安全。输出恒 JPEG(≤2K b64 / 大图走 img.dengche.cc CDN url→b64)。
+    // 透明 fail-closed(JPEG 无 alpha)。brand 比 revehigh 多兜 firefly(低档 adobe 底,防错误文案泄漏)。
+    revefull: {
+        baseUrl: 'https://reve.amlkcloud.top',
+        brand: /\bamlkcloud\b|\bdengche\b|\breve\b|\bfirefly\b/gi,
+        openAllTiers: true,
+        noTransparentBackground: true,
+    },
     // ---- oaidist/oaidistfull(ch201/ch202)守门 + 全量线 ----
     // 【上游变迁史】2026-08-24 首接 64.32.31.178:3009 是真 OpenAI 签名;2026-09-06 复测该上游【静默
     // 变成 Adobe Firefly】(见 memory image2 project + ch83-adobe-c2pa-image-leak,上游会偷偷换后端)。
