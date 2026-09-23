@@ -79,18 +79,26 @@ export const IMAGE_PROVIDERS_25: Record<string, ImageProvider25> = {
         models: GPT_IMAGE_25_MODELS,
         // 无 qualities = 5 档全收(全量线)。2026-09-13 曾只放 xhigh/max,09-14 改全量。
     },
-    // zdchat25:new.zdchat.cc(key sk-g2HE…)。2026-09-17 实测 37/37 全 200、全部 OpenAI OpCo C2PA + 原始编码、
+    // zdchat25:api.zdapi.cc(key sk-g2HE…)。【2026-09-23 厂商搬站】原域名 new.zdchat.cc(45.78.73.20)整机失联
+    // —— 三个出口(server1 / server2 / 本地)ICMP 全丢、443/80/22 全 timeout,适配器每次固定 ~10.5s
+    // `fetch failed` 再 failover,当天 ch230 一小时刷出 4000+ 条 503;apex zdchat.cc 另一台活着但 nginx 502。
+    // 新入口 api.zdapi.cc(40.160.130.122)同一家(图床仍 r2.52image.xyz)、key 不变,server2 实测:
+    // /v1/models 只回 flare+sunburst 两个、generations low 196 / xhigh 3122(官方档位值,非 llmway 那种静默降档)、
+    // edits multipart 通、返回 url 可下载。provider 名 zdchat25 保持不变(ch230 的 base_url 路径按它拼,改名即断线)。
+    // 以下 2026-09-17 那轮 37/37 全档实测是在旧域名做的,新域名只抽测了 low/xhigh/edits/双模型:
+    // 37/37 全 200、全部 OpenAI OpCo C2PA + 原始编码、
     // usage 逐档官方(196/439/1756/3122/7024;1536×1024 1372、1024×1536 158、2880² 5930、4K 3336)、5 档全如实
     // (sunburst 同)、尺寸全如实含 4K 原生非放大、透明真 RGBA、edits 通;零 Adobe、零 5xx;延迟 low 15–23s /
     // xhigh 35–63s / max 58–129s。指纹与 ominiapi 的 OpenAI 侧同款号池(1000×1000 不 400 返 1024² 计 192、
     // Trufo/OpenAI TSA 两 CA 混出、壳带 model),同类平台隔天就变,别把某天结论当常态。
     // 【全量线(operator 2026-09-17 拍板)】不设 qualities。已知毛病全由适配器兜:n>1 时返 1 或 2 张不定
     // (按实际张数计费)、webp/jpeg 被忽略返 PNG(jpeg 由适配器转码兜底)、非法 quality/size 上游不 400
-    // (入口 400 靠适配器)、edits 输入 token 报 0(适配器自算)、size=auto 返非标尺寸(按返回图实际尺寸计费)、
+    // (入口 400 靠适配器)、edits 输入 token 旧域名报 0 / 新域名报实数(适配器一律 synthUsage25 自算,两边都不受影响)、
+    // size=auto 返非标尺寸(按返回图实际尺寸计费)、
     // 返回 url 指向 r2.52image.xyz 刚返回时可能 0 字节(fetchImageAsB64 已带重试)。
     zdchat25: {
-        baseUrl: 'https://new.zdchat.cc',
-        brand: /\bzdchat\b|\b52image\b|\badobe\b|\bfirefly\b/gi,
+        baseUrl: 'https://api.zdapi.cc',
+        brand: /\bzdchat\b|\bzdapi\b|\b52image\b|\badobe\b|\bfirefly\b/gi,
         models: GPT_IMAGE_25_MODELS,
     },
 };

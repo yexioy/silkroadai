@@ -782,11 +782,13 @@ describe('zdchat25 全量线 + url→b64 拉取重试', () => {
         });
     const pngResp = () => new Response(new Uint8Array(Buffer.from(pngB64(1024, 1024), 'base64')), { status: 200 });
 
-    it('registry:zdchat25 = new.zdchat.cc、两模型、无 qualities(全量);brand 抹 zdchat/52image/adobe', () => {
-        expect(IMAGE_PROVIDERS_25.zdchat25.baseUrl).toBe('https://new.zdchat.cc');
+    it('registry:zdchat25 = api.zdapi.cc(2026-09-23 搬站)、两模型、无 qualities(全量);brand 抹 zdchat/zdapi/52image/adobe', () => {
+        expect(IMAGE_PROVIDERS_25.zdchat25.baseUrl).toBe('https://api.zdapi.cc');
         expect(IMAGE_PROVIDERS_25.zdchat25.models).toEqual(GPT_IMAGE_25_MODELS);
         expect(IMAGE_PROVIDERS_25.zdchat25.qualities).toBeUndefined();
         expect('zdchat r2.52image.xyz Adobe'.replace(IMAGE_PROVIDERS_25.zdchat25.brand, '*')).toBe('* r2.*.xyz *');
+        // 新域名也要被抹掉,别让 api.zdapi.cc 从错误体里漏给客户。
+        expect('api.zdapi.cc down'.replace(IMAGE_PROVIDERS_25.zdchat25.brand, '*')).toBe('api.*.cc down');
     });
 
     it('5 档 + auto 全部透传上游,按官方档计费', async () => {
@@ -806,7 +808,7 @@ describe('zdchat25 全量线 + url→b64 拉取重试', () => {
                 'zdchat25',
             );
             expect(res.status).toBe(200);
-            expect(String(fetchMock.mock.calls[0][0])).toBe('https://new.zdchat.cc/v1/images/generations');
+            expect(String(fetchMock.mock.calls[0][0])).toBe('https://api.zdapi.cc/v1/images/generations');
             expect(((await res.json()) as { usage: { output_tokens: number } }).usage.output_tokens).toBe(expectTokens);
         }
     });
