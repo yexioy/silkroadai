@@ -213,12 +213,14 @@ export const IMAGE_PROVIDERS: Record<string, ImageProvider> = {
         noTransparentBackground: true,
     },
     // revefull:reve.amlkcloud.top 同一上游 + 同一 key 的【全量】线(镜像 revehigh,openAllTiers)。
-    // 2026-09-23 实测:上游是【混合池】——high 档干净(无 C2PA,见 revehigh),但 **low/medium/auto 走
-    // Adobe Firefly**(出图带 adobe C2PA)→ 由适配器内容自定向 C2PA 剥离(#440)统一处理,不外泄。
+    // 2026-09-23 实测(dump JPEG 段核实):low/medium/auto 出图【带 C2PA,但 claim_generator=`OpenAI
+    // Media` / `org.contentauth.c2pa`,APP11 段内零 adobe/firefly】—— 这与【真 gpt-image 官方出图自带
+    // 的内容凭证一致,不是外泄他家上游身份】,故内容自定向剥离(#440,只在命中 adobe/firefly 时剥)
+    // 正确【放行】,客户拿到的 C2PA 与官方一致。若该混合池某张真带 adobe,strip 无条件跑仍会剥。
     // ⚠️【low/medium 大尺寸静默降级】:low 1536×1024 → 实交 1264×848、medium 2048² → 实交 1536²
     // (high 档才尺寸全如实);openAllTiers 计费一律按【返回图实际尺寸】合成官方公式(imageDimensions
     // 解 JPEG SOF)→ 降级只少收不超收,安全。输出恒 JPEG(≤2K b64 / 大图走 img.dengche.cc CDN url→b64)。
-    // 透明 fail-closed(JPEG 无 alpha)。brand 比 revehigh 多兜 firefly(低档 adobe 底,防错误文案泄漏)。
+    // 透明 fail-closed(JPEG 无 alpha)。brand 多兜 firefly 纯防御(实测无,防未来漂移到 adobe 时文案泄漏)。
     revefull: {
         baseUrl: 'https://reve.amlkcloud.top',
         brand: /\bamlkcloud\b|\bdengche\b|\breve\b|\bfirefly\b/gi,
