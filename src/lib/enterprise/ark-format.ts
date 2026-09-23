@@ -190,6 +190,8 @@ export interface ArkSubmittedParams {
     safetyIdentifier?: string | null;
     outputFormat?: string | null;
     tools?: unknown;
+    /** 官方创建参数(任务超时阈值秒);客户传了就回显,否则官方默认 172800。 */
+    executionExpiresAfter?: number | null;
 }
 
 /** 上游(火山方舟原生体)带出来的元数据(上游未给的项走火山官方默认值)。 */
@@ -269,6 +271,7 @@ export function buildArkTaskResponse(inp: ArkTaskResponseInput): Record<string, 
     const fps = meta?.framespersecond ?? VOLC_DEFAULT_FPS;
     const frames = arkFrames(meta, fps, inp.duration);
     const toolsEcho = submittedTools(meta, sub);
+    const expiresAfter = meta?.executionExpiresAfter ?? sub?.executionExpiresAfter ?? VOLC_DEFAULT_EXPIRES_AFTER;
 
     // BytePlus 形专属扩展字段(火山官方形不带,否则客户白名单校验拒)。
     if (inp.extended) {
@@ -289,7 +292,7 @@ export function buildArkTaskResponse(inp: ArkTaskResponseInput): Record<string, 
         base.draft = false;
         base.service_tier = m.serviceTier || VOLC_DEFAULT_SERVICE_TIER;
         base.framespersecond = fps;
-        base.execution_expires_after = m.executionExpiresAfter ?? VOLC_DEFAULT_EXPIRES_AFTER;
+        base.execution_expires_after = expiresAfter;
         base.generate_audio = m.generateAudio ?? inp.generateAudio ?? true;
         base.seed = m.seed ?? (inp.seed != null ? Number(inp.seed) : 0);
         base.tools = toolsEcho ?? m.tools ?? [];
@@ -308,7 +311,7 @@ export function buildArkTaskResponse(inp: ArkTaskResponseInput): Record<string, 
     // (此前我们按旧文档只出 11 个字段,客户按新文档校验就缺项)。不带 draft / upstream_id(官方无)。
     if (!inp.extended && !inp.volcMeta) {
         const m = inp.upstreamMeta ?? null;
-        base.execution_expires_after = m?.executionExpiresAfter ?? VOLC_DEFAULT_EXPIRES_AFTER;
+        base.execution_expires_after = expiresAfter;
         base.framespersecond = fps;
         base.generate_audio = m?.generateAudio ?? inp.generateAudio ?? true;
         base.seed = m?.seed ?? (inp.seed != null ? Number(inp.seed) : 0);
