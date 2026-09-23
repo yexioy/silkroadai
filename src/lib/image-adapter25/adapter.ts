@@ -46,6 +46,10 @@ export type ImageMode = 'generations' | 'edits';
 const DEFAULT_UPSTREAM_TIMEOUT_MS = 600_000;
 /** 对齐 OpenAI images 的 n≤10;超出只钳制不报错。 */
 const MAX_N = 10;
+/** n 补齐的最大补打轮数(见 handler 里的补齐段)。 */
+const MAX_TOPUP_ROUNDS_25 = 2;
+/** n 补齐的总耗时预算(从首次上游调用开始计),留在 Caddy :3010 的 600s 之下。 */
+const TOPUP_BUDGET_MS_25 = 540_000;
 
 // ============ 官方 token 公式(5 档网格)============
 // 2026-09-09 用 viper3 官 key 交叉验证:1024² low 196 / medium 439 / high 1756 / xhigh 3122 / max 7024,
@@ -770,9 +774,52 @@ export async function handleAdapter25Image(
     // ---- 调上游(n 原生透传,一次拿 n 张)----
     const started = Date.now();
     const result = await callUpstream(provider, providerName, mode, parsed, n, auth);
+    let roundMs = Date.now() - started;
     if (isTerminalReject(result)) return terminalReject(result);
     let items = (result ?? []).map((b64_json) => ({ b64_json, generation_id: newGenerationId() }));
+    // 一张没拿到 → failover(换渠道比原地重试更可能成);拿到一部分 → 补齐,见下。
     if (items.length === 0) return failover('upstream_error', 'upstream call failed');
+
+    // ---- n 补齐(2026-09-23)----
+    // 上游【原生 n】在号池型上游身上不可靠:zdchat 实测 n>1 请求约 1/3 少给(要 2 回 1、要 4 回 2),
+    // 客户感知就是"n 参数不读了"。以前只 warn 不补。这里补打缺的张数,三重封顶:
+    //  - 轮数 ≤ MAX_TOPUP_ROUNDS_25;
+    //  - 某轮零产出立即停(上游整体不行,再打白打);
+    //  - 只有【按上一轮实际耗时估计本轮结束仍在 TOPUP_BUDGET_MS_25 内】才开下一轮 ——
+    //    2.5 max 档单次可达 130-200s,绝不把请求推过 Caddy :3010 的 600s(504 比少一张更糟)。
+    // 补齐轮命中终态【不】推翻已拿到的图。计费不受影响:synthUsage25 恒按 items.length 算。
+    for (let round = 1; round <= MAX_TOPUP_ROUNDS_25 && items.length < n; round++) {
+        const elapsed = Date.now() - started;
+        if (elapsed + roundMs > TOPUP_BUDGET_MS_25) {
+            console.warn('[image-adapter25] top-up skipped (time budget)', {
+                provider: providerName,
+                mode,
+                requested: n,
+                got: items.length,
+                elapsedMs: elapsed,
+            });
+            break;
+        }
+        const missing = n - items.length;
+        const t0 = Date.now();
+        const more = await callUpstream(provider, providerName, mode, parsed, missing, auth);
+        roundMs = Date.now() - t0;
+        const gained = isTerminalReject(more) ? [] : (more ?? []);
+        items = items.concat(gained.map((b64_json) => ({ b64_json, generation_id: newGenerationId() })));
+        console.warn('[image-adapter25] top-up round', {
+            provider: providerName,
+            mode,
+            round,
+            missing,
+            gained: gained.length,
+            total: items.length,
+            ms: roundMs,
+        });
+        if (gained.length === 0 || isTerminalReject(more)) break;
+    }
+    // 补齐轮里上游可能多给(我们要 1 它回 2)→ 只交付客户请求的 n 张:超发会跟着超收。
+    if (items.length > n) items = items.slice(0, n);
+
     if (items.length < n) {
         console.warn('[image-adapter25] upstream returned fewer than n', {
             provider: providerName,

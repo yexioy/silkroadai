@@ -51,6 +51,11 @@ const DEFAULT_UPSTREAM_TIMEOUT_MS = 600_000;
 /** n>1 扇出的上限(对齐 OpenAI images 的 n≤10)。超出只钳制不报错 —— 客户仍拿到 10 张,
  *  也挡住 n=100 这种把单请求内存推到 GB 级(4K 单张 b64 ~12-17MB)的用法。 */
 const MAX_FANOUT = 10;
+/** n 补齐的最大补打轮数(见 handler 里的补齐段)。 */
+const MAX_TOPUP_ROUNDS = 2;
+/** n 补齐的总耗时预算(从首轮扇出开始计)。留在 Caddy :3010 的 600s response_header_timeout
+ *  之下:补齐是"锦上添花",把请求推成 504 比少交付一张更糟。 */
+const TOPUP_BUDGET_MS = 540_000;
 
 // ============ 官方 token 公式(核心计费杠杆)============
 // 2026-08-11 从官方计算器组件源码提取(developers.openai.com 的
@@ -644,19 +649,66 @@ export async function handleAdapterImage(
     if (parsed.n > MAX_FANOUT) {
         console.warn('[image-adapter] n clamped', { provider: providerName, requested: parsed.n, used: MAX_FANOUT });
     }
-    const results = await Promise.all(
-        Array.from({ length: fanout }, () => callUpstreamOnce(provider, providerName, mode, parsed, auth)),
-    );
+    const fanoutRound = (count: number) =>
+        Promise.all(Array.from({ length: count }, () => callUpstreamOnce(provider, providerName, mode, parsed, auth)));
+    const collect = (rs: (string[] | TerminalReject | null)[]) =>
+        rs.flatMap((r) =>
+            (Array.isArray(r) ? r : []).map((b64_json) => ({ b64_json, generation_id: newGenerationId() })),
+        );
+
+    const results = await fanoutRound(fanout);
+    let roundMs = Date.now() - started;
     // 任一扇出返回【终态】(内容安全 / 请求本身错)→ 立即终态化,不 failover(换渠道也拒,别浪费重试位)。
     const terminal = results.find(isTerminalReject);
     if (terminal) return terminalReject(terminal.terminal);
-    let items = results.flatMap((r) =>
-        (Array.isArray(r) ? r : []).map((b64_json) => ({ b64_json, generation_id: newGenerationId() })),
-    );
+    let items = collect(results);
     if (items.length === 0) {
-        // 全军覆没才 failover(部分成功 → 返回拿到的那几张,按张计费)
+        // 全军覆没才 failover(部分成功 → 先补齐,见下)。这里【不】补打:换渠道比原地重试更可能成。
         return failover('upstream_error', `all ${fanout} upstream call(s) failed`);
     }
+
+    // ---- n 补齐(2026-09-23)----
+    // 部分扇出【非终态】失败(上游 503 / 余额不足 403 / 429 / 超时)时,以前直接把少的那几张咽下去,
+    // 客户看到的就是"n 参数不生效"(当天 we-token 按档三条线阵发性只回 1/4 张,单客户 880 要 770 给)。
+    // 这里补打缺的张数,三重封顶:
+    //  - 轮数 ≤ MAX_TOPUP_ROUNDS;
+    //  - 某轮零产出立即停(上游在整体故障,再打也是白打);
+    //  - 只有【按上一轮实际耗时估计本轮结束仍在 TOPUP_BUDGET_MS 内】才开下一轮 —— 慢上游
+    //    (单次 250s+)最多补一轮且绝不把请求推过 Caddy 的 600s。
+    // 补齐轮里命中终态【不】把整个请求推翻成 400:已经有图了,交付已有的比全丢好。
+    // 计费不受影响:synthUsage 恒按实际交付张数算,补不齐就按少的收。
+    for (let round = 1; round <= MAX_TOPUP_ROUNDS && items.length < fanout; round++) {
+        const elapsed = Date.now() - started;
+        if (elapsed + roundMs > TOPUP_BUDGET_MS) {
+            console.warn('[image-adapter] top-up skipped (time budget)', {
+                provider: providerName,
+                mode,
+                requested: fanout,
+                got: items.length,
+                elapsedMs: elapsed,
+            });
+            break;
+        }
+        const missing = fanout - items.length;
+        const t0 = Date.now();
+        const more = await fanoutRound(missing);
+        roundMs = Date.now() - t0;
+        const gained = collect(more);
+        items = items.concat(gained);
+        console.warn('[image-adapter] top-up round', {
+            provider: providerName,
+            mode,
+            round,
+            missing,
+            gained: gained.length,
+            total: items.length,
+            ms: roundMs,
+        });
+        if (gained.length === 0 || more.some(isTerminalReject)) break;
+    }
+    // 上游单次多给(每次调用按约定只要 1 张)→ 只交付客户请求的 n 张:超发会跟着超收。
+    if (items.length > fanout) items = items.slice(0, fanout);
+
     if (items.length < fanout) {
         console.warn('[image-adapter] partial fanout', {
             provider: providerName,
