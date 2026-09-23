@@ -215,8 +215,16 @@ describe('handleAdapter25Image 透传契约', () => {
         expect(body.usage.output_tokens).toBe(586); // 官方 n 张 = ceil(3×195.1),不是 196×3=588
     });
 
-    it('上游少返(n=3 只回 2)→ 按 2 张计费不失败', async () => {
-        okUpstream([pngB64(1024, 1024), pngB64(1024, 1024)]);
+    it('上游少返且补齐也拿不到(n=3 只回 2,补齐轮空手)→ 按 2 张计费不失败', async () => {
+        let call = 0;
+        fetchMock.mockImplementation(async () =>
+            call++ === 0
+                ? new Response(
+                      JSON.stringify({ data: [{ b64_json: pngB64(1024, 1024) }, { b64_json: pngB64(1024, 1024) }] }),
+                      { status: 200, headers: { 'content-type': 'application/json' } },
+                  )
+                : new Response('{"error":{}}', { status: 503 }),
+        );
         const res = await handleAdapter25Image(
             jsonReq(URL_GEN, { model: 'gpt-image-2.5-flare', prompt: 'x', size: '1024x1024', quality: 'low', n: 3 }),
             'generations',
@@ -284,6 +292,107 @@ describe('handleAdapter25Image 透传契约', () => {
         const raw = JSON.stringify(await res.json());
         expect(raw).not.toContain('oss-upstream');
         expect(raw).toContain(pngB64(1024, 1024));
+    });
+});
+
+/**
+ * n 补齐(2026-09-23):上游【原生 n】在号池型上游身上不可靠 —— zdchat 实测 n>1 请求约 1/3 少给
+ * (要 2 回 1、要 4 回 2),客户投诉"n 参数不读了"。以前只 warn 不补。
+ */
+describe('handleAdapter25Image n 补齐(上游少给后补打)', () => {
+    /** 按调用顺序依次返回每批图(空数组 = 该次 503);超出批次数后恒 503。 */
+    function seqUpstream(batches: number[]) {
+        let call = 0;
+        fetchMock.mockImplementation(async () => {
+            const count = batches[call++] ?? 0;
+            if (count === 0) return new Response('{"error":{}}', { status: 503 });
+            return new Response(
+                JSON.stringify({
+                    created: 1,
+                    data: Array.from({ length: count }, () => ({ b64_json: pngB64(1024, 1024) })),
+                }),
+                { status: 200, headers: { 'content-type': 'application/json' } },
+            );
+        });
+    }
+    const gen = (n: number) =>
+        handleAdapter25Image(
+            jsonReq(URL_GEN, { model: 'gpt-image-2.5-flare', prompt: 'x', size: '1024x1024', quality: 'low', n }),
+            'generations',
+            'wetokenasia25',
+        );
+    const bodyOf = (res: Response) => res.json() as Promise<{ data: unknown[]; usage: { output_tokens: number } }>;
+
+    it('要 2 回 1 → 补打 1 张凑满,按 2 张计费(客户实案 c-70fd7c5f 19:06)', async () => {
+        seqUpstream([1, 1]);
+        const res = await gen(2);
+        expect(res.status).toBe(200);
+        const body = await bodyOf(res);
+        expect(body.data).toHaveLength(2);
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect(body.usage.output_tokens).toBe(391); // ceil(2×195.1),不是 196
+    });
+
+    it('补齐请求只要【缺的那几张】(n=missing),不是整个 n 重打', async () => {
+        seqUpstream([2, 2]);
+        await gen(4);
+        const second = JSON.parse(String((fetchMock.mock.calls[1] as [string, RequestInit])[1].body)) as {
+            n?: number;
+        };
+        expect(second.n).toBe(2);
+    });
+
+    it('两轮补齐封顶:要 4 每次只回 1 → 3 张后停,按 3 张计费', async () => {
+        seqUpstream([1, 1, 1, 1]);
+        const res = await gen(4);
+        const body = await bodyOf(res);
+        expect(fetchMock).toHaveBeenCalledTimes(3); // 首轮 + 2 轮补齐
+        expect(body.data).toHaveLength(3);
+        expect(body.usage.output_tokens).toBe(586); // ceil(3×195.1)
+    });
+
+    it('补齐轮空手 → 立即停,不打满轮数', async () => {
+        seqUpstream([1]); // 第 2 次起恒 503
+        const res = await gen(4);
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect((await bodyOf(res)).data).toHaveLength(1);
+    });
+
+    it('一张没拿到 → 503 failover,【不】原地补打(换渠道更可能成)', async () => {
+        seqUpstream([]);
+        const res = await gen(3);
+        expect(res.status).toBe(503);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('补齐轮命中终态(内容安全)→ 不推翻已拿到的图,200 交付已有', async () => {
+        let call = 0;
+        fetchMock.mockImplementation(async () =>
+            call++ === 0
+                ? new Response(JSON.stringify({ data: [{ b64_json: pngB64(1024, 1024) }] }), {
+                      status: 200,
+                      headers: { 'content-type': 'application/json' },
+                  })
+                : new Response('{"error":{"code":"image_unsafe"}}', { status: 451 }),
+        );
+        const res = await gen(2);
+        expect(res.status).toBe(200);
+        expect((await bodyOf(res)).data).toHaveLength(1);
+    });
+
+    it('首轮就命中终态 → 仍然 400(补齐不改变既有语义)', async () => {
+        fetchMock.mockImplementation(async () => new Response('{"error":{"code":"image_unsafe"}}', { status: 451 }));
+        const res = await gen(2);
+        expect(res.status).toBe(400);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('补齐轮上游多给 → 只交付 n 张(不超发也不超收)', async () => {
+        seqUpstream([1, 3]); // 缺 1 张却回了 3 张
+        const res = await gen(2);
+        const body = await bodyOf(res);
+        expect(body.data).toHaveLength(2);
+        expect(body.usage.output_tokens).toBe(391);
     });
 });
 

@@ -560,7 +560,8 @@ describe('handleAdapterImage n>1 并发扇出(ominiapi 忽略 n,只能自己扇)
         expect((await res.json()).data).toHaveLength(10);
     });
 
-    it('部分失败 → 返回拿到的那几张,按实际张数计费(不 failover)', async () => {
+    it('部分失败 → 补齐后仍差 → 返回拿到的那几张,按实际张数计费(不 failover)', async () => {
+        // 偶数次调用恒失败:首轮 4 次拿 2 张 → 补齐轮 2 次拿 1 张 → 再补 1 次拿 0 张(零产出停)
         let call = 0;
         fetchMock.mockImplementation(async () => {
             const i = call++;
@@ -577,8 +578,9 @@ describe('handleAdapterImage n>1 并发扇出(ominiapi 忽略 n,只能自己扇)
         );
         expect(res.status).toBe(200);
         const body = await res.json();
-        expect(body.data).toHaveLength(2);
-        expect(body.usage.output_tokens).toBe(ctN(3840, 2160, 'high', 2)); // 只收 2 张的钱
+        expect(body.data).toHaveLength(3);
+        expect(fetchMock).toHaveBeenCalledTimes(7); // 4 首轮 + 2 补齐 + 1 补齐(零产出后停)
+        expect(body.usage.output_tokens).toBe(ctN(3840, 2160, 'high', 3)); // 只收 3 张的钱
     });
 
     it('全部失败 → 503 failover(不合成 usage)', async () => {
@@ -589,7 +591,7 @@ describe('handleAdapterImage n>1 并发扇出(ominiapi 忽略 n,只能自己扇)
             'ominiapi',
         );
         expect(res.status).toBe(503);
-        expect(fetchMock).toHaveBeenCalledTimes(3);
+        expect(fetchMock).toHaveBeenCalledTimes(3); // 全军覆没【不】补打 —— 换渠道比原地重试更可能成
     });
 
     it('multipart edits 扇出:每次都重建 FormData 且带齐输入图', async () => {
@@ -655,6 +657,106 @@ describe('handleAdapterImage n>1 并发扇出(ominiapi 忽略 n,只能自己扇)
         const mask = sentForm.get('mask');
         expect(mask).toBeInstanceOf(Blob);
         expect((mask as File).name).toBe('m.png');
+    });
+});
+
+/**
+ * n 补齐(2026-09-23):首轮扇出有几发打空时补打缺的张数。
+ * 背景:当天 we-token 按档三条线阵发性只回 1/4 张,客户投诉"n 参数不生效";
+ * 以前只 warn 不补,少给的那几张直接咽下去。
+ */
+describe('handleAdapterImage n 补齐(部分扇出失败后补打)', () => {
+    /** 前 failFirst 次调用失败(429),之后恒成功。 */
+    function failThenOk(failFirst: number) {
+        let call = 0;
+        fetchMock.mockImplementation(async () => {
+            const i = call++;
+            if (i < failFirst) return new Response('{"error":{"message":"busy"}}', { status: 429 });
+            return new Response(JSON.stringify({ data: [{ b64_json: `ok${i}` }] }), {
+                status: 200,
+                headers: { 'content-type': 'application/json' },
+            });
+        });
+    }
+    const gen4 = () =>
+        handleAdapterImage(
+            jsonReq(URL_GEN, { model: 'gpt-image-2', prompt: 'x', size: '3840x2160', quality: 'high', n: 4 }),
+            'generations',
+            'ominiapi',
+        );
+
+    it('首轮 4 中 2 → 补齐轮补满 4 张,按 4 张计费', async () => {
+        failThenOk(2); // 首轮前 2 次失败 → 拿 2 张;补齐轮 2 次全成
+        const res = await gen4();
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.data).toHaveLength(4);
+        expect(fetchMock).toHaveBeenCalledTimes(6); // 4 + 2
+        expect(body.usage.output_tokens).toBe(ctN(3840, 2160, 'high', 4));
+        expect(new Set(body.data.map((d: { b64_json: string }) => d.b64_json)).size).toBe(4); // 4 张互不相同
+    });
+
+    it('首轮 4 中 1 → 两轮补齐封顶(第 3 轮不打)', async () => {
+        // 每轮只成一发:首轮 4 次(#0 成)→ 补齐 3 次(#4 成)→ 补齐 2 次(#7 成)→ 轮数到顶
+        const winners = new Set([0, 4, 7]);
+        let call = 0;
+        fetchMock.mockImplementation(async () => {
+            const i = call++;
+            if (!winners.has(i)) return new Response('{"error":{}}', { status: 503 });
+            return new Response(JSON.stringify({ data: [{ b64_json: `ok${i}` }] }), {
+                status: 200,
+                headers: { 'content-type': 'application/json' },
+            });
+        });
+        const res = await gen4();
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(fetchMock).toHaveBeenCalledTimes(9); // 4 + 3 + 2,MAX_TOPUP_ROUNDS=2 之后不再补
+        expect(body.data).toHaveLength(3);
+        expect(body.usage.output_tokens).toBe(ctN(3840, 2160, 'high', 3)); // 补不满就按少的收
+    });
+
+    it('首轮就拿满 → 不触发补齐(一次多余上游调用都不打)', async () => {
+        okUpstream();
+        await gen4();
+        expect(fetchMock).toHaveBeenCalledTimes(4);
+    });
+
+    it('补齐轮命中终态(内容安全)→ 不把整个请求推翻成 400,交付已拿到的图', async () => {
+        let call = 0;
+        fetchMock.mockImplementation(async () => {
+            const i = call++;
+            if (i < 4) {
+                // 首轮:2 成 2 败(非终态)
+                if (i % 2 === 0) return new Response('{"error":{"message":"busy"}}', { status: 429 });
+                return new Response(JSON.stringify({ data: [{ b64_json: `ok${i}` }] }), {
+                    status: 200,
+                    headers: { 'content-type': 'application/json' },
+                });
+            }
+            // 补齐轮:上游改口说内容不安全
+            return new Response('{"error":{"code":"image_unsafe"}}', { status: 451 });
+        });
+        const res = await gen4();
+        expect(res.status).toBe(200); // 不是 400 —— 已经有图了,终态只停补齐
+        const body = await res.json();
+        expect(body.data).toHaveLength(2);
+        expect(body.usage.output_tokens).toBe(ctN(3840, 2160, 'high', 2));
+    });
+
+    it('首轮就命中终态 → 仍然 400 终态(补齐不改变这条既有语义)', async () => {
+        fetchMock.mockImplementation(async () => new Response('{"error":{"code":"image_unsafe"}}', { status: 451 }));
+        const res = await gen4();
+        expect(res.status).toBe(400);
+        expect(fetchMock).toHaveBeenCalledTimes(4); // 只有首轮
+    });
+
+    it('上游单次多给 → 只交付 n 张(不超发也不超收)', async () => {
+        okUpstream(3); // 每次调用回 3 张
+        const res = await gen4();
+        const body = await res.json();
+        expect(body.data).toHaveLength(4);
+        expect(body.usage.output_tokens).toBe(ctN(3840, 2160, 'high', 4));
     });
 });
 
