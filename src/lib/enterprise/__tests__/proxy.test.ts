@@ -1892,6 +1892,50 @@ describe('火山官方查询响应新字段(2026-09-23)', () => {
         );
     });
 
+    it('ark 提交:execution_expires_after / bitrate_mode / moderation_options 不再 400(客户 2026-09-23 实测被拒);expires 落库并在查询回显', async () => {
+        submitVideoWithKey.mockResolvedValue(
+            NextResponse.json({ id: 'cgt-nf2', task_id: 'cgt-nf2', status: 'queued' }),
+        );
+        const res = await handleEnterpriseArkV3(
+            req('POST', '/api/v3/contents/generations/tasks', {
+                model: 'seedance-2-5',
+                content: [{ type: 'text', text: '清晨城市公园' }],
+                resolution: '720p',
+                duration: 4,
+                ratio: '16:9',
+                execution_expires_after: 3600,
+                bitrate_mode: 'vbr',
+                moderation_options: { ips: ['ip-1'] },
+            }),
+            '/contents/generations/tasks',
+        );
+        expect(res.status).toBe(200);
+        expect(db.seedanceVideoTask.create).toHaveBeenCalledWith({
+            data: expect.objectContaining({ execution_expires_after: 3600 }),
+        });
+        // 透传到适配器(cn-adapter 反向白名单再转上游)
+        expect(submitVideoWithKey).toHaveBeenCalledWith(
+            expect.objectContaining({ execution_expires_after: 3600, bitrate_mode: 'vbr' }),
+            expect.any(String),
+        );
+        // 查询回显客户传的阈值,而不是官方默认 172800
+        db.seedanceVideoTask.findUnique.mockResolvedValue({ ...cnTask, id: 'cgt-nf2', execution_expires_after: 3600 });
+        pollVideoWithKey.mockResolvedValue(
+            NextResponse.json({
+                id: 'cgt-nf2',
+                task_id: 'cgt-nf2',
+                object: 'video',
+                status: 'in_progress',
+                progress: 50,
+            }),
+        );
+        const q = await handleEnterpriseArkV3(
+            req('GET', '/api/v3/contents/generations/tasks/cgt-nf2'),
+            '/contents/generations/tasks/cgt-nf2',
+        );
+        expect(((await q.json()) as Record<string, unknown>).execution_expires_after).toBe(3600);
+    });
+
     it('ark 提交:没传这三项 → 落库 null / 省略(存量语义不变)', async () => {
         submitVideoWithKey.mockResolvedValue(
             NextResponse.json({ id: 'cgt-nf0', task_id: 'cgt-nf0', status: 'queued' }),
@@ -1908,6 +1952,7 @@ describe('火山官方查询响应新字段(2026-09-23)', () => {
         expect(data.safety_identifier).toBeNull();
         expect(data.output_format).toBeNull();
         expect(data.tools).toBeUndefined();
+        expect(data.execution_expires_after).toBeNull();
     });
 
     it('cn 查询(xinhankr 线,适配器不回显任何元数据)→ 新字段全部从落库值 / 官方默认值合成', async () => {

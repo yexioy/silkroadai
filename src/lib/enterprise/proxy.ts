@@ -443,6 +443,9 @@ const ARK_ALLOWED_FIELDS = new Set([
     'service_tier',
     'priority',
     'tools', // 2026-09-23:官方创建/查询都有 tools,此前被白名单 400 挡在门外
+    'execution_expires_after', // 2026-09-23:官方创建参数(任务超时阈值),客户实测被 400
+    'bitrate_mode', // 火山官方字段(2026-08-26 实测上游收),v1 面早已透传,ark 面补齐
+    'moderation_options', // 火山官方(版权放行 ips);volc 透 ips、cn 暂消费掉,但不该 400
     // 我们支持的别名/OpenAI 形入参(保留兼容,均为已知字段)
     'prompt',
     'seconds',
@@ -576,11 +579,13 @@ function submittedArkParams(t: {
     safety_identifier?: string | null;
     output_format?: string | null;
     tools?: unknown;
+    execution_expires_after?: number | null;
 }): ArkSubmittedParams {
     return {
         safetyIdentifier: t.safety_identifier ?? null,
         outputFormat: t.output_format ?? null,
         tools: t.tools ?? null,
+        executionExpiresAfter: t.execution_expires_after ?? null,
     };
 }
 
@@ -829,6 +834,10 @@ async function handleSubmitInner(req: NextRequest, format: ClientFormat, ctx: Re
                         : null,
                 tools:
                     Array.isArray(body.tools) && body.tools.length ? (body.tools as Prisma.InputJsonValue) : undefined,
+                execution_expires_after:
+                    typeof body.execution_expires_after === 'number' && Number.isInteger(body.execution_expires_after)
+                        ? body.execution_expires_after
+                        : null,
             },
         });
     } catch (e) {
