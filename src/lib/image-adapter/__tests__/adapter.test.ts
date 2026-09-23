@@ -2286,6 +2286,107 @@ describe('revehigh provider(reve.amlkcloud.top,gpt-image-2 high 专线,onlyQuali
     });
 });
 
+describe('revefull provider(reve.amlkcloud.top 同上游同 key 的全量线,openAllTiers)', () => {
+    const URL_RF = 'http://portal.test/image-adapter/revefull/v1/images/generations';
+
+    it('openAllTiers:方图 low 放行,路由 reve.amlkcloud.top,送裸 gpt-image-2,合成官方 196', async () => {
+        okUpstream();
+        const res = await handleAdapterImage(
+            jsonReq(URL_RF, { model: 'gpt-image-2', prompt: 'x', size: '1024x1024', quality: 'low' }),
+            'generations',
+            'revefull',
+        );
+        expect(res.status).toBe(200);
+        const [url, init] = fetchMock.mock.calls[0];
+        expect(url).toBe('https://reve.amlkcloud.top/v1/images/generations');
+        expect(JSON.parse(init.body as string).model).toBe('gpt-image-2');
+        expect((await res.json()).usage.output_tokens).toBe(196); // 官方 1024² low
+    });
+
+    it('上游静默降级尺寸 → 按【返回图实际尺寸】计费(low 1536×1024 实交 1264×848,防超收)', async () => {
+        // 请求 1536×1024 low,上游降级返 1264×848 的图 → 计费必须是 1264×848 low,不是请求值
+        fetchMock.mockImplementation(
+            async () =>
+                new Response(JSON.stringify({ created: 1, data: [{ b64_json: pngB64(1264, 848) }] }), {
+                    status: 200,
+                    headers: { 'content-type': 'application/json' },
+                }),
+        );
+        const res = await handleAdapterImage(
+            jsonReq(URL_RF, { model: 'gpt-image-2', prompt: 'x', size: '1536x1024', quality: 'low' }),
+            'generations',
+            'revefull',
+        );
+        expect(res.status).toBe(200);
+        expect((await res.json()).usage.output_tokens).toBe(officialOutputTokens(1264, 848, 'low'));
+    });
+
+    it('size=auto → 透传上游,按返回图实际尺寸(1024²)合成官方 low(196)', async () => {
+        fetchMock.mockImplementation(
+            async () =>
+                new Response(JSON.stringify({ created: 1, data: [{ b64_json: pngB64(1024, 1024) }] }), {
+                    status: 200,
+                    headers: { 'content-type': 'application/json' },
+                }),
+        );
+        const res = await handleAdapterImage(
+            jsonReq(URL_RF, { model: 'gpt-image-2', prompt: 'x', size: 'auto', quality: 'low' }),
+            'generations',
+            'revefull',
+        );
+        expect(res.status).toBe(200);
+        expect((await res.json()).usage.output_tokens).toBe(196);
+    });
+
+    it('background=transparent → 503 拒(JPEG 无 alpha,fail-closed)', async () => {
+        const res = await handleAdapterImage(
+            jsonReq(URL_RF, {
+                model: 'gpt-image-2',
+                prompt: 'x',
+                size: '1024x1024',
+                quality: 'medium',
+                background: 'transparent',
+            }),
+            'generations',
+            'revefull',
+        );
+        expect(res.status).toBe(503);
+        expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('上游返 dengche CDN url → 拉回转 b64,不外泄上游 url', async () => {
+        fetchMock
+            .mockResolvedValueOnce(
+                new Response(JSON.stringify({ created: 1, data: [{ url: 'https://img.dengche.cc/leo/x.jpg' }] }), {
+                    status: 200,
+                    headers: { 'content-type': 'application/json' },
+                }),
+            )
+            .mockResolvedValueOnce(
+                new Response(new Uint8Array(Buffer.from(pngB64(2880, 2880), 'base64')), { status: 200 }),
+            );
+        const res = await handleAdapterImage(
+            jsonReq(URL_RF, { model: 'gpt-image-2', prompt: 'x', size: '2880x2880', quality: 'high' }),
+            'generations',
+            'revefull',
+        );
+        expect(res.status).toBe(200);
+        expect(JSON.stringify(await res.json())).not.toContain('dengche');
+    });
+
+    it('brand 正则抹掉 amlkcloud / dengche / reve / firefly(低档 adobe 底)', () => {
+        const out = sanitizeAdapterError(
+            'reve.amlkcloud.top via dengche.cc adobe firefly failed',
+            /\bamlkcloud\b|\bdengche\b|\breve\b|\bfirefly\b/gi,
+        );
+        const lc = out.toLowerCase();
+        expect(lc).not.toContain('amlkcloud');
+        expect(lc).not.toContain('dengche');
+        expect(lc).not.toContain('firefly');
+        expect(lc).not.toContain('adobe');
+    });
+});
+
 describe('frimodelhigh provider(frimodel 第四账号,onlyQualities=[high] + gpt-image-2-adobe)', () => {
     const URL_FH = 'http://portal.test/image-adapter/frimodelhigh/v1/images/generations';
     const gen = (body: Record<string, unknown>) =>
