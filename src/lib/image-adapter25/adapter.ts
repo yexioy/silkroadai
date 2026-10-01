@@ -755,6 +755,19 @@ export async function handleAdapter25Image(
     // 16 倍数、~1MP,与官方尺寸集不同但画幅语义一致)。auto 无法预估 ct,2.5 全量线本就不守门,不受影响。
     const autoSize = isAutoSize(parsed.size);
     const dims = autoSize ? null : parseSize(parsed.size);
+    // ---- 显式 size 边长非 16 倍数 → 入口 400,不打上游(2026-10-01)----
+    // 官方 / 真透传上游(we-token)对 1000x1000 回 400 `edges must be multiples of 16`;号池类上游
+    // (yuanshudian25 / zdchat25 / ominiapi25)不拒,静默出 992² 或 1024² —— 客户拿到没要的尺寸,且落哪条
+    // 渠道行为不同。计费按返回图实际像素故不超收,但契约要一致:这里按官方文案统一拒。
+    // auto / 缺省 / 非 WxH 串(dims=null)不拦,照旧交上游。
+    if (dims && (dims.w % 16 !== 0 || dims.h % 16 !== 0)) {
+        console.warn('[image-adapter25] invalid size rejected', { provider: providerName, size: parsed.size });
+        return terminalReject({
+            terminal: 'bad_request',
+            detail: `invalid image size: edges must be multiples of 16 (got "${parsed.size.trim()}")`,
+            param: 'size',
+        });
+    }
     const quality = normQuality25(parsed.quality);
     // ---- 档位白名单:上游对名单外档位是【静默降级】而非拒绝(llmway xhigh/max → medium),直通会让
     // 客户按高档付费拿低档图;让路 503 给别的渠道,不打上游。归一后判(auto/缺省 = low 照常放行)。 ----
