@@ -254,6 +254,17 @@ silkroadai/
 - [x] 追加(2026-09-27):国内版 2.5 480p 的 service-inference.ai 线 **/v1 → /v2**(operator 指定)。两台机 `.env` 置 `SEEDANCE_SVCINF_API_VERSION=v2` 已滚动生效(smoke:新任务 `/v2/video/tasks/{mvt}` 200、`/v1` 404);代码缺省同步改 v2,置 `v1` 可切回。
 - [x] 追加(同日,客户实测 `execution_expires_after` 被 400):`/api/v3` 提交白名单再补 `execution_expires_after` / `bitrate_mode` / `moderation_options`(官方创建参数);migration `20260923020000` 加 `execution_expires_after` 列,客户传了就回显客户值,没传给官方默认 172800。**教训:ark 面白名单是正向清单,官方每加一个创建参数就得跟一次** —— 新参数先查白名单。
 
+### 企业门户 seedance 查询回显成片真值 + prompt 内联 `--duration`(2026-09-30)
+
+- [x] PR #501 merge `ea29785` + 两台机部署 + 真金 smoke ✅ — 客户 zhixiangweilai 测试报告(galaxytoken.ai 国内版 seedance 2.5)称「duration 错误致计费混乱」。**扣费本身没错**(按上游 `usage` token 结算,金额与成片一致),错的是回显与时长解析:
+    - **xinhankr(cn)上游查询响应只有 `status` / `data[].url` / `usage`,不带 duration / ratio / resolution**(生产 key 直查实锤)。`upstreamNum(j?.duration) ?? task.duration` 只对 service-inference 线(volc、cn 2.5 480p)有效,cn 720p/1080p 永远回显库里的提交参数 → `duration=-1` 回显 -1。
+    - 提交时 ratio 没传却落库 `'16:9'` → 模型自选 9:16 的成片回显 16:9。现落 NULL,成片出来后按实测回填。
+    - body 没传 duration 时硬填 5 并总注入上游 body,压掉了提示词内联 `--duration 25`(火山官方弱校验通道,官方生效)。
+    - **新 `resolveRequestedDuration`(cn-adapter)**:body > 内联 `--duration N` / `--dur N` > 缺省 5;内联值不合法当没写。enterprise proxy / cn-proxy / 适配器核心三处共用 —— **估价、落库、转发必须同值**,改时长解析只改这一个函数。
+    - **新 `src/lib/enterprise/video-probe.ts`**:Range 读成片头 256KB 取 mvhd 时长 + tkhd 宽高(火山 VOD moov 在文件头,实测 0.3–1.8s)。只在完成态且库里为「未定」(duration=-1 / ratio 空)时探测,测到即回填任务行,之后不再重复探测;失败时无输入视频的任务按 token 反推(仅回显不落库)。
+    - 真金 smoke(throwaway 账号,测后已软删):`duration=-1` 未传 ratio → 回显 `duration:10` / `ratio:"9:16"` / `frames:241`,扣 ¥14.5195;未传 duration + `--duration 8` → 落库 8、回显 8,扣 ¥11.6276;body `duration:31` 仍 400。
+    - **未改**:缺省时长仍 5(客户称官方 2.5 缺省 -1,改了=所有不传 duration 的客户账单变,待 operator 拍板);其余内联指令(`--resolution` / `--ratio` 等)未处理;v1 形查询响应不回显 duration;存量任务行的 `'16:9'` 分不清来源,不回补。**北京独立系统(vps3)未部署本修复。**
+
 ### /v1 请求体守门补「必填字段」(2026-09-30)
 
 - [x] 分支 `fix/proxy-required-fields-400` — 客户对标 Azure 官方的 77 格契约测试(az-gpt 组 gpt-6-sol / gpt-6-luna)报「缺 `messages` 的非法请求回 HTTP 500」。生产日志定位:500 是 **new-api 本地 <1ms 吐的**(`relay error: field messages is required`),没打上游(见 gotcha #23)。`src/lib/proxy/body-guard.ts` 新增 `validateRequired(obj, surface)`,三条面在类型校验通过后各调一次,只拒 new-api 必然 500 的输入:chat / messages 的 `messages` 缺失 / null / 空数组(chat 带 `prefix`/`suffix` 的 FIM 豁免)、responses 的 `input` 键缺失(`input:null` 不拦)、max_tokens 类字段 > 1073741823。OpenAI 面用官方文案 + code(`missing_required_parameter` / `empty_array` / `integer_above_max_value`),`/messages` 用 Anthropic 形。fail-open。`/v1beta` 的 `contents is required` 同类 500 本次未拦。
