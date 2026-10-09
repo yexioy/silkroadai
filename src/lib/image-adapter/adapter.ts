@@ -110,6 +110,13 @@ function normQuality(q: string): Quality {
     return s === 'medium' || s === 'high' ? s : 'low';
 }
 
+/** 发给上游的 quality:provider.upstreamQuality 有替换则替换(只影响上游 body;计费与回显仍按客户请求档,
+ *  见 providers.ts 字段注释),否则原样归一透传。 */
+function upstreamQualityFor(provider: ImageProvider, q: string): Quality {
+    const norm = normQuality(q);
+    return provider.upstreamQuality?.[norm] ?? norm;
+}
+
 /** 守门线:合成售价必须显著高于上游按张成本(¥0.1/张)。
  *  售价 ≈ ct × CompletionRatio(6) × ModelRatio(2.5) × GroupRatio(≈1.3) / 500k(500k quota=¥1),
  *  ¥0.15 ⇒ 3,846 token。线下:low/auto/standard 全族(≤659)、小尺寸 medium(1K=1,756、
@@ -500,7 +507,7 @@ async function callUpstreamOnce(
         const sendSize = parsed.upstreamSize ?? parsed.size.trim(); // auto 原样透传;缺省不发(官方缺省即 auto)
         if (sendSize) f.append('size', sendSize);
         f.append('response_format', 'b64_json'); // 不带时 ominiapi 返自家 OSS url(上游身份泄漏),显式要 b64
-        if (parsed.quality) f.append('quality', normQuality(parsed.quality));
+        if (parsed.quality) f.append('quality', upstreamQualityFor(provider, parsed.quality));
         for (const [k, v] of Object.entries(parsed.extras)) f.append(k, v);
         for (const img of parsed.images)
             f.append('image', new Blob([new Uint8Array(img.buf)], { type: img.type }), img.name);
@@ -515,7 +522,7 @@ async function callUpstreamOnce(
         };
         const sendSize = parsed.upstreamSize ?? parsed.size.trim(); // auto 原样透传;缺省不发(官方缺省即 auto)
         if (sendSize) j.size = sendSize;
-        if (parsed.quality) j.quality = normQuality(parsed.quality);
+        if (parsed.quality) j.quality = upstreamQualityFor(provider, parsed.quality);
         // extras 存成字符串;JSON body 里整型字段(output_compression)要转回 number,否则上游拒
         for (const [k, v] of Object.entries(parsed.extras)) {
             j[k] = INT_EXTRAS.has(k) && /^\d+$/.test(v) ? Number(v) : v;
@@ -616,6 +623,21 @@ export async function handleAdapterImage(
     if (provider.noTransparentBackground && wantsTransparent) {
         console.log('[image-adapter] transparent not served', { provider: providerName, mode });
         return failover('transparent_not_served', 'provider not verified for background=transparent');
+    }
+
+    // ---- 尺寸白名单(调上游之前,不花钱)----
+    // 只支持固定尺寸表的上游(providers.ts sizes):表外显式尺寸 / auto / 缺省一律让路,否则上游会静默改尺寸交付
+    // (pixellelabs 实测 1536×1024 → 2304×1536),客户拿到的像素与请求对不上。
+    if (provider.sizes) {
+        const requested = parsed.size.trim().toLowerCase();
+        if (!requested || isAutoSize(parsed.size) || !provider.sizes.includes(requested)) {
+            console.log('[image-adapter] size not served', {
+                provider: providerName,
+                mode,
+                size: parsed.size || 'auto',
+            });
+            return failover('size_not_served', `size ${parsed.size || 'auto'} not in provider size list`);
+        }
     }
 
     // ---- 守门(调上游之前,不花钱)----
