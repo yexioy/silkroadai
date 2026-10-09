@@ -157,7 +157,27 @@ export interface SvcinfSubmitFailure {
 }
 
 /**
+ * 提交对上游 5xx 的单次退避重试(2026-10-09 svcinf 网关连续三分钟 503 之后加)。
+ *
+ * 只重试 500 / 502 / 503:这三种是网关 / 派发层在**建任务之前**拒绝(实测原文
+ * `Service temporarily unavailable, please retry` / `Failed to submit video generation job: Upstream
+ * service temporarily unavailable`),重发不会产生第二条任务。**504 不重试**:网关超时意味着请求可能
+ * 已经到了方舟并建了任务,再发一次 = 两条付费任务。fetch 抛错(连接层 / 30s 超时)同理不重试。
+ *
+ * 退避时长 `SEEDANCE_SVCINF_SUBMIT_RETRY_MS`(毫秒,默认 1500;设 0 = 关闭重试)。改 env 即生效,不用发版。
+ */
+const SUBMIT_RETRY_STATUSES: ReadonlySet<number> = new Set([500, 502, 503]);
+const SUBMIT_RETRY_DEFAULT_MS = 1500;
+export function submitRetryDelayMs(): number {
+    const raw = process.env.SEEDANCE_SVCINF_SUBMIT_RETRY_MS?.trim();
+    if (!raw) return SUBMIT_RETRY_DEFAULT_MS;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : SUBMIT_RETRY_DEFAULT_MS;
+}
+
+/**
  * 提交(上游 body 已由调用方翻译好)。上游原始报错体只落日志;对客透传方舟原文(仅剥身份标记,#271)。
+ * 上游 500/502/503 退避一次再发(见 submitRetryDelayMs 注释);其余状态 / 连接错单发即返。
  * @param tag  日志前缀 + 错误 type(如 'volc-adapter' / 'seedance-cn-adapter')
  */
 export async function submitSvcinfTask(
@@ -169,19 +189,39 @@ export async function submitSvcinfTask(
         ok: false,
         res: errJson(tag.errType, status, code, message, category),
     });
-    let upstream: Response;
-    try {
-        upstream = await fetch(`${cfg.base}/${cfg.api}/video/generate`, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${cfg.key}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify(upstreamBody),
-            signal: AbortSignal.timeout(30000),
-        });
-    } catch (e) {
-        console.warn(`[${tag.log}] submit unreachable`, { err: String(e) });
-        return fail(502, 'upstream_unreachable', 'upstream temporarily unavailable, please retry');
+    const body = JSON.stringify(upstreamBody);
+    const retryDelay = submitRetryDelayMs();
+    const maxAttempts = retryDelay > 0 ? 2 : 1;
+    let upstream: Response | undefined;
+    let text = '';
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            upstream = await fetch(`${cfg.base}/${cfg.api}/video/generate`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${cfg.key}`, 'Content-Type': 'application/json' },
+                body,
+                signal: AbortSignal.timeout(30000),
+            });
+        } catch (e) {
+            // 连接层失败不重试:30s 超时也可能是对端已受理,重发有双任务风险。
+            console.warn(`[${tag.log}] submit unreachable`, { err: String(e), attempt });
+            return fail(502, 'upstream_unreachable', 'upstream temporarily unavailable, please retry');
+        }
+        text = await upstream.text();
+        if (attempt < maxAttempts && SUBMIT_RETRY_STATUSES.has(upstream.status)) {
+            console.warn(`[${tag.log}] submit ${upstream.status}, retrying once`, {
+                model: tag.model,
+                upstream_model: upstreamBody.model,
+                delay_ms: retryDelay,
+                body: text.slice(0, 500),
+            });
+            await new Promise((r) => setTimeout(r, retryDelay));
+            continue;
+        }
+        break;
     }
-    const text = await upstream.text();
+    // 循环至少跑一轮,upstream/text 必已赋值
+    const res = upstream as Response;
     let j: { task?: { id?: string }; id?: string } | null;
     try {
         j = JSON.parse(text) as { task?: { id?: string }; id?: string };
@@ -189,16 +229,17 @@ export async function submitSvcinfTask(
         j = null;
     }
     const taskId = j?.task?.id ?? j?.id;
-    if (!upstream.ok || !taskId) {
-        const cls = passthroughUpstreamError(unwrapUpstreamError(text), upstream.status);
+    if (!res.ok || !taskId) {
+        const cls = passthroughUpstreamError(unwrapUpstreamError(text), res.status);
         console.warn(`[${tag.log}] submit failed`, {
             model: tag.model,
             upstream_model: upstreamBody.model,
-            status: upstream.status,
+            status: res.status,
             category: cls.category,
+            attempts: maxAttempts > 1 && SUBMIT_RETRY_STATUSES.has(res.status) ? 2 : 1,
             body: text.slice(0, 2000),
         });
-        return fail(upstream.status >= 400 ? upstream.status : 502, 'upstream_error', cls.message, cls.category);
+        return fail(res.status >= 400 ? res.status : 502, 'upstream_error', cls.message, cls.category);
     }
     return { ok: true, taskId };
 }
