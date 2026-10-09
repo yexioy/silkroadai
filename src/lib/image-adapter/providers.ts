@@ -43,10 +43,59 @@ export interface ImageProvider {
      *  到 ch186/208 等出图;代价是 we-token 侧 >300s 才成功的那 0.2%(当日 p99 203s / p99.9 390s)被误杀重跑。
      *  只按 provider 覆盖,别改全局缺省(2026-08-23 300→600 是为 n>1 大图客户改的,其他上游要留 600)。 */
     upstreamTimeoutMs?: number;
+    /** 显式尺寸白名单(`WxH` 字符串)。设了名单的上游【只收】名单内的显式 size;名单外的显式尺寸、
+     *  `size=auto` 与缺省一律 503 让路给别的渠道(调上游之前拒,不花钱)。给「只支持固定尺寸表」的上游用
+     *  (pixellelabs:厂商确认只支持 10 比例 × 1K/2K/4K 共 30 个尺寸,其余会被静默改尺寸交付)。
+     *  缺省(undefined)= 不按名单守门,沿用 openAllTiers / gateMinCt / onlyQualities 原有规则。 */
+    sizes?: ReadonlyArray<string>;
+    /** 发给上游的 quality 替换表(按归一后的请求档 → 上游档)。只改【发给上游的 body】;计费(synthUsage 按
+     *  客户请求档合成官方账单)与响应回显(`quality` 字段)仍用客户请求档。给「某档上游不兑现、但 operator
+     *  决定照常承接」的线用(pixellelabs:high 在上游静默等于 medium,2026-10-09 operator 拍板 high 用 medium
+     *  替代、响应仍显示 high)。缺省 = 原样透传。 */
+    upstreamQuality?: Partial<Record<'low' | 'medium' | 'high', 'low' | 'medium' | 'high'>>;
 }
 
 /** we-token 系上游的单次调用超时(见 ImageProvider.upstreamTimeoutMs)。 */
 export const WETOKEN_UPSTREAM_TIMEOUT_MS = 300_000;
+
+/** pixellelabs 厂商确认的全部支持尺寸(2026-10-09 operator 与上游沟通所得):10 比例 × 1K/2K/4K。
+ *  每一条都在官方约束内(16 倍数、最长边 ≤3840、比例 ≤3:1、像素 ∈ [655,360, 8,294,400]),但官方是约束集不是
+ *  枚举表,这里只是官方合法尺寸的一个 30 点子集。 */
+export const PIXELLELABS_SIZES: ReadonlyArray<string> = [
+    // 3:1 / 21:9 / 16:9
+    '1536x512',
+    '3072x1024',
+    '3840x1280',
+    '1344x576',
+    '2688x1152',
+    '3840x1648',
+    '1280x720',
+    '2048x1152',
+    '3840x2160',
+    // 3:2 / 4:3 / 1:1
+    '1152x768',
+    '2304x1536',
+    '3520x2352',
+    '1024x768',
+    '2048x1536',
+    '3312x2480',
+    '1024x1024',
+    '2048x2048',
+    '2880x2880',
+    // 3:4 / 2:3 / 9:16 / 1:3
+    '768x1024',
+    '1536x2048',
+    '2480x3312',
+    '768x1152',
+    '1536x2304',
+    '2352x3520',
+    '720x1280',
+    '1152x2048',
+    '2160x3840',
+    '512x1536',
+    '1024x3072',
+    '1280x3840',
+];
 
 export const IMAGE_PROVIDERS: Record<string, ImageProvider> = {
     // ominiapi:1k/2k/4k 统一 ¥0.1/张 → 只值得接 4K 全档 + 2K-high(守门在 adapter.ts)
@@ -356,6 +405,28 @@ export const IMAGE_PROVIDERS: Record<string, ImageProvider> = {
         baseUrl: 'https://open302.com',
         brand: /\bopen-?302\b|词元|开放堆栈|\bfirefly\b/gi,
         openAllTiers: true,
+        noTransparentBackground: true,
+    },
+    // pixellelabs:api.pixellelabs.com(自研网关,错误码 `ERR-XXXX`)。2026-10-09 实测 gpt-image-2:24/24 真 OpenAI
+    // API 签名(softwareAgent API/gpt-image-2,原始编码,b64 直返),按张 $0.06 一口价(账单差分 high/low 各 6 美分)。
+    //  - 【high 静默降 medium】:high×3/auto/xhigh 全报 usage 1756、延迟与 medium 相同(57–60s);4K high 报 3336、
+    //    2880² high 5930 都是 medium 网格值。operator 2026-10-09 拍板:high 请求发上游时用 medium 替代,
+    //    响应仍回显 high、计费仍按 high 合成 → upstreamQuality {high:'medium'}。
+    //  - 【只支持固定尺寸表】:厂商确认 10 比例 × 1K/2K/4K 共 30 个尺寸(下方 PIXELLELABS_SIZES);表外会被静默
+    //    改尺寸交付(实测 1536×1024 → 2304×1536、1024×1536 → 1536×2304、1344×1008 → 2048×1536),operator 拍板
+    //    表外让路 → sizes 白名单;auto 同样让路(表里没有 auto,且它恒出 1024²)。生产抽样(2026-10-09 8h)
+    //    表内尺寸约占 2.0 流量 57%,2560×1440 / 1920×1088 / 1536×1024 / 1024×1536 / 1792×1024 等 43% 走别的渠道。
+    //  - n 只支持 1(上游 400 `n currently supports 1 only`)—— 适配器 n 是扇出单图实现,无影响。
+    //  - 透明请求被上游 451「blocked for safety reasons」伪装(普通橙汁杯也拒 = 不支持透明)→ noTransparentBackground
+    //    在入口拦,否则 #504 后 451 会变成终态 moderation_blocked 错误交给客户。
+    //  - webp 被忽略返 PNG(适配器按字节 sniff 回显);1000×1000 上游正确 400;延迟 26–92s 偏慢。
+    //  计费:openAllTiers 显式尺寸按请求尺寸合成官方账单(low 196 / medium 1756 / high 7024…),与上游 $0.06 无关。
+    pixellelabs: {
+        baseUrl: 'https://api.pixellelabs.com',
+        brand: /\bpixelle\s?labs?\b|\bERR-[0-9A-F]{6,}\b|\bfirefly\b/gi,
+        openAllTiers: true,
+        sizes: PIXELLELABS_SIZES,
+        upstreamQuality: { high: 'medium' },
         noTransparentBackground: true,
     },
 };

@@ -5,7 +5,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { NextRequest } from 'next/server';
-import { IMAGE_PROVIDERS } from '@/lib/image-adapter/providers';
+import { PIXELLELABS_SIZES, IMAGE_PROVIDERS } from '@/lib/image-adapter/providers';
 import {
     handleAdapterImage,
     imageDimensions,
@@ -1719,6 +1719,174 @@ describe('frimodelmedium provider(frimodel 新账号,onlyQualities=[medium] + up
             'ominiapi',
         );
         expect(JSON.parse(fetchMock.mock.calls[0][1].body as string).model).toBe('gpt-image-2');
+    });
+});
+
+describe('pixellelabs provider(尺寸白名单 + high→medium 上游替换、回显/计费仍按 high)', () => {
+    const URL_PX = 'http://portal.test/image-adapter/pixellelabs/v1/images/generations';
+    const gen = (body: Record<string, unknown>) =>
+        handleAdapterImage(
+            jsonReq(URL_PX, { model: 'gpt-image-2', prompt: 'x', size: '1024x1024', ...body }),
+            'generations',
+            'pixellelabs',
+        );
+    const upstreamQ = () => JSON.parse(fetchMock.mock.calls[0][1].body as string).quality as string;
+
+    it('registry:api.pixellelabs.com、openAllTiers、30 个尺寸白名单、high→medium、透明拒;brand 抹品牌与 ERR- 码', () => {
+        const p = IMAGE_PROVIDERS.pixellelabs;
+        expect(p.baseUrl).toBe('https://api.pixellelabs.com');
+        expect(p.openAllTiers).toBe(true);
+        expect(p.sizes).toBe(PIXELLELABS_SIZES);
+        expect(PIXELLELABS_SIZES).toHaveLength(30);
+        expect(new Set(PIXELLELABS_SIZES).size).toBe(30);
+        for (const sz of PIXELLELABS_SIZES) {
+            const [w, h] = sz.split('x').map(Number); // 每条都在官方约束内
+            expect(w % 16).toBe(0);
+            expect(h % 16).toBe(0);
+            expect(Math.max(w, h)).toBeLessThanOrEqual(3840);
+            expect(Math.max(w, h) / Math.min(w, h)).toBeLessThanOrEqual(3);
+            expect(w * h).toBeGreaterThanOrEqual(655_360);
+            expect(w * h).toBeLessThanOrEqual(8_294_400);
+        }
+        expect(p.upstreamQuality).toEqual({ high: 'medium' });
+        expect(p.noTransparentBackground).toBe(true);
+        expect('PixelleLabs ERR-A744AC9A4F firefly'.replace(p.brand, '*')).toBe('* * *');
+    });
+
+    it('表内尺寸放行(1024² / 2048x1152 / 3840x2160 / 512x1536),按请求尺寸与请求档合成官方账单', async () => {
+        for (const [size, q] of [
+            ['1024x1024', 'low'],
+            ['2048x1152', 'medium'],
+            ['3840x2160', 'high'],
+            ['512x1536', 'low'],
+        ] as const) {
+            const [w, h] = size.split('x').map(Number);
+            const ct = officialOutputTokens(w, h, q); // 1024² low = 196、4K high = 13342(官方计算器口径)
+            fetchMock.mockReset();
+            okUpstream();
+            const res = await gen({ size, quality: q });
+            expect(res.status).toBe(200);
+            expect(fetchMock).toHaveBeenCalledTimes(1);
+            expect(fetchMock.mock.calls[0][0]).toBe('https://api.pixellelabs.com/v1/images/generations');
+            const body = await res.json();
+            expect(body.size).toBe(size);
+            expect(body.usage.output_tokens).toBe(ct);
+            if (size === '1024x1024') expect(ct).toBe(196);
+            if (size === '3840x2160') expect(ct).toBe(13342);
+        }
+    });
+
+    it('表外显式尺寸(1536x1024 / 1024x1536 / 2560x1440 / 1344x1008)、auto、缺省 → 503 让路,不打上游', async () => {
+        for (const body of [
+            { size: '1536x1024' },
+            { size: '1024x1536' },
+            { size: '2560x1440' },
+            { size: '1344x1008' },
+            { size: 'auto' },
+            { size: '' },
+        ]) {
+            fetchMock.mockReset();
+            okUpstream();
+            const res = await gen({ quality: 'medium', ...body });
+            expect(res.status).toBe(503);
+            expect(fetchMock).not.toHaveBeenCalled();
+            expect((await res.json()).error.code).toBe('upstream_unavailable');
+        }
+    });
+
+    it('high:上游 body 收到 medium,响应回显 high、usage 按 high(1024² = 7024)', async () => {
+        okUpstream();
+        const res = await gen({ quality: 'high' });
+        expect(res.status).toBe(200);
+        expect(upstreamQ()).toBe('medium');
+        const body = await res.json();
+        expect(body.quality).toBe('high');
+        expect(body.usage.output_tokens).toBe(7024);
+    });
+
+    it('low / medium 原样透传(不被替换表波及);medium 回显 medium 计 1756', async () => {
+        for (const [q, ct] of [
+            ['low', 196],
+            ['medium', 1756],
+        ] as const) {
+            fetchMock.mockReset();
+            okUpstream();
+            const res = await gen({ quality: q });
+            expect(upstreamQ()).toBe(q);
+            const body = await res.json();
+            expect(body.quality).toBe(q);
+            expect(body.usage.output_tokens).toBe(ct);
+        }
+    });
+
+    it('edits multipart:high 同样替换成 medium 发上游,表外尺寸同样让路', async () => {
+        okUpstream();
+        const f = new FormData();
+        for (const [k, v] of Object.entries({ model: 'gpt-image-2', prompt: 'x', size: '1024x1024', quality: 'high' }))
+            f.append(k, v);
+        f.append(
+            'image',
+            new Blob([new Uint8Array(Buffer.from(pngB64(1024, 1024), 'base64'))], { type: 'image/png' }),
+            'in.png',
+        );
+        const res = await handleAdapterImage(
+            new NextRequest('http://portal.test/image-adapter/pixellelabs/v1/images/edits', {
+                method: 'POST',
+                headers: { authorization: 'Bearer sk-upstream-test' },
+                body: f,
+            }),
+            'edits',
+            'pixellelabs',
+        );
+        expect(res.status).toBe(200);
+        const sent = fetchMock.mock.calls[0][1].body as FormData;
+        expect(sent.get('quality')).toBe('medium');
+        expect((await res.json()).quality).toBe('high');
+
+        fetchMock.mockReset();
+        okUpstream();
+        const f2 = new FormData();
+        for (const [k, v] of Object.entries({ model: 'gpt-image-2', prompt: 'x', size: '1536x1024', quality: 'low' }))
+            f2.append(k, v);
+        f2.append(
+            'image',
+            new Blob([new Uint8Array(Buffer.from(pngB64(1024, 1024), 'base64'))], { type: 'image/png' }),
+            'in.png',
+        );
+        const res2 = await handleAdapterImage(
+            new NextRequest('http://portal.test/image-adapter/pixellelabs/v1/images/edits', {
+                method: 'POST',
+                headers: { authorization: 'Bearer sk-upstream-test' },
+                body: f2,
+            }),
+            'edits',
+            'pixellelabs',
+        );
+        expect(res2.status).toBe(503);
+        expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('透明请求 → 503 让路不打上游(上游用 451 伪装不支持透明)', async () => {
+        okUpstream();
+        const res = await gen({ quality: 'low', background: 'transparent' });
+        expect(res.status).toBe(503);
+        expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('其他 provider 不受 sizes / upstreamQuality 影响(open302 收 1536x1024,high 原样透传)', async () => {
+        okUpstream();
+        const res = await handleAdapterImage(
+            jsonReq('http://portal.test/image-adapter/open302/v1/images/generations', {
+                model: 'gpt-image-2',
+                prompt: 'x',
+                size: '1536x1024',
+                quality: 'high',
+            }),
+            'generations',
+            'open302',
+        );
+        expect(res.status).toBe(200);
+        expect(upstreamQ()).toBe('high');
     });
 });
 
