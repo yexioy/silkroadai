@@ -1166,6 +1166,170 @@ describe('synoralink25 全量线(与 yuanshudian25 同后端、独立账号池 �
     });
 });
 
+describe('qimg25 全量线(Firefly 中转:flare OpenAI 原生签名、sunburst Adobe 签名;url 为 Firefly S3 预签名)', () => {
+    const URL_Q = 'http://portal.test/image-adapter25/qimg25/v1/images/generations';
+    /** 带 caBX(C2PA)块的最小 PNG。 */
+    function pngWithCaBX(w: number, h: number, payload: string): Buffer {
+        const ihdr = Buffer.alloc(13);
+        ihdr.writeUInt32BE(w, 0);
+        ihdr.writeUInt32BE(h, 4);
+        ihdr[8] = 8;
+        ihdr[9] = 2;
+        const chunk = (type: string, data: Buffer) => {
+            const len = Buffer.alloc(4);
+            len.writeUInt32BE(data.length, 0);
+            return Buffer.concat([len, Buffer.from(type, 'latin1'), data, Buffer.alloc(4)]);
+        };
+        return Buffer.concat([
+            Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+            chunk('IHDR', ihdr),
+            chunk('caBX', Buffer.from(payload, 'latin1')),
+            chunk('IEND', Buffer.alloc(0)),
+        ]);
+    }
+
+    it('registry:qimg.cc、两模型、无 qualities(全量);brand 抹 qimg / 10k pool / Firefly S3 域 / adobe', () => {
+        const p = IMAGE_PROVIDERS_25.qimg25;
+        expect(p.baseUrl).toBe('https://qimg.cc');
+        expect(p.models).toEqual(GPT_IMAGE_25_MODELS);
+        expect(p.qualities).toBeUndefined();
+        expect(
+            'qimg 10k pool upstream unavailable https://pre-signed-firefly-prod.s3-accelerate.amazonaws.com/x Adobe'.replace(
+                p.brand,
+                '*',
+            ),
+        ).toBe('* * upstream unavailable https://*/x *'); // 整个 Firefly S3 主机名被一次抹掉
+    });
+
+    it('5 档 + auto 全部原样透传(不做替换),按官方档计费 —— 上游按 2.0 词表乱记的 usage 被丢弃', async () => {
+        for (const [q, expectTokens] of [
+            ['low', 196],
+            ['medium', 439],
+            ['high', 1756],
+            ['xhigh', 3122],
+            ['max', 7024],
+            ['auto', 196],
+        ] as const) {
+            fetchMock.mockReset();
+            fetchMock.mockImplementation(
+                async () =>
+                    new Response(
+                        JSON.stringify({
+                            created: 1,
+                            data: [{ b64_json: pngB64(1024, 1024) }],
+                            usage: { output_tokens: 1756 }, // 上游对 xhigh/max 一律记 1756
+                            quality: 'medium',
+                            size: '',
+                        }),
+                        { status: 200, headers: { 'content-type': 'application/json' } },
+                    ),
+            );
+            const res = await handleAdapter25Image(
+                jsonReq(URL_Q, { model: 'gpt-image-2.5-flare', prompt: 'x', size: '1024x1024', quality: q }),
+                'generations',
+                'qimg25',
+            );
+            expect(res.status).toBe(200);
+            expect(String(fetchMock.mock.calls[0][0])).toBe('https://qimg.cc/v1/images/generations');
+            const sent = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body));
+            if (q) expect(sent.quality).toBe(q); // 原样透传,xhigh/max 不被改写
+            const body = (await res.json()) as { usage: { output_tokens: number }; quality: string; size: string };
+            expect(body.usage.output_tokens).toBe(expectTokens);
+            expect(body.size).toBe('1024x1024');
+        }
+    });
+
+    it('sunburst 走 Adobe 签名 → caBX 被剥;flare 走 OpenAI 签名 → 字节原样', async () => {
+        const adobe = pngWithCaBX(1024, 1024, 'jumdc2pa Adobe_Firefly com.adobe.modelVersions gpt-image-2.5-prism');
+        fetchMock.mockImplementation(
+            async () =>
+                new Response(JSON.stringify({ created: 1, data: [{ b64_json: adobe.toString('base64') }] }), {
+                    status: 200,
+                    headers: { 'content-type': 'application/json' },
+                }),
+        );
+        const r1 = (await (
+            await handleAdapter25Image(
+                jsonReq(URL_Q, { model: 'gpt-image-2.5-sunburst', prompt: 'x', size: '1024x1024', quality: 'max' }),
+                'generations',
+                'qimg25',
+            )
+        ).json()) as { data: Array<{ b64_json: string }> };
+        const out1 = Buffer.from(r1.data[0].b64_json, 'base64');
+        expect(out1.includes(Buffer.from('Adobe'))).toBe(false);
+        expect(out1.includes(Buffer.from('caBX'))).toBe(false);
+
+        const openai = pngWithCaBX(1024, 1024, 'jumdc2pa OpenAI Media Service API OpenAI OpCo, LLC');
+        fetchMock.mockImplementation(
+            async () =>
+                new Response(JSON.stringify({ created: 1, data: [{ b64_json: openai.toString('base64') }] }), {
+                    status: 200,
+                    headers: { 'content-type': 'application/json' },
+                }),
+        );
+        const r2 = (await (
+            await handleAdapter25Image(
+                jsonReq(URL_Q, { model: 'gpt-image-2.5-flare', prompt: 'x', size: '1024x1024', quality: 'max' }),
+                'generations',
+                'qimg25',
+            )
+        ).json()) as { data: Array<{ b64_json: string }> };
+        expect(Buffer.from(r2.data[0].b64_json, 'base64').equals(openai)).toBe(true);
+    });
+
+    it('上游返 Firefly S3 预签名 url → 拉回转 b64,绝不外泄 url', async () => {
+        fetchMock
+            .mockResolvedValueOnce(
+                new Response(
+                    JSON.stringify({
+                        created: 1,
+                        data: [
+                            {
+                                url: 'https://pre-signed-firefly-prod.s3-accelerate.amazonaws.com/a/b.png?X-Amz-Signature=1',
+                            },
+                        ],
+                    }),
+                    { status: 200, headers: { 'content-type': 'application/json' } },
+                ),
+            )
+            .mockResolvedValueOnce(
+                new Response(new Uint8Array(Buffer.from(pngB64(1024, 1024), 'base64')), { status: 200 }),
+            );
+        const res = await handleAdapter25Image(
+            jsonReq(URL_Q, { model: 'gpt-image-2.5-flare', prompt: 'x', size: '1024x1024', quality: 'low' }),
+            'generations',
+            'qimg25',
+        );
+        expect(res.status).toBe(200);
+        const raw = JSON.stringify(await res.json());
+        expect(raw).not.toContain('firefly');
+        expect(raw).not.toContain('amazonaws');
+        expect(raw).toContain(pngB64(1024, 1024));
+    });
+
+    it('上游 503 `10k pool upstream unavailable` → 503 failover,体中性不泄池名', async () => {
+        fetchMock.mockResolvedValue(
+            new Response(
+                JSON.stringify({
+                    error: {
+                        message: '10k pool upstream unavailable',
+                        type: 'pool_upstream_unavailable',
+                        code: 'ERR-B928F59599',
+                    },
+                }),
+                { status: 503 },
+            ),
+        );
+        const res = await handleAdapter25Image(
+            jsonReq(URL_Q, { model: 'gpt-image-2.5-flare', prompt: 'x', size: '1024x1024', quality: 'high' }),
+            'generations',
+            'qimg25',
+        );
+        expect(res.status).toBe(503);
+        expect(await res.text()).not.toMatch(/10k pool|qimg/i);
+    });
+});
+
 describe('2.5 适配器 mask 透传(2026-09-19 补齐;此前只在 2.0 适配器修了)', () => {
     it('multipart edits 带 mask → 上游 FormData 含 mask 文件,不计费', async () => {
         okUpstream([pngB64(1024, 1024)]);
