@@ -158,6 +158,20 @@ export const IMAGE_PROVIDERS_25: Record<string, ImageProvider25> = {
     //  - 稳定性:同站 2.0 key 的「10k pool」自 10-09 07:57Z 起整池挂 >1 天;2.5 池首发也出过一次 18s 的
     //    `10k pool upstream unavailable`(503,走通用 failover)。
     // 【全量线(operator 2026-10-10 拍板)】不设 qualities。
+    // yobox25:max.yoboxai.com(YoBoxAI,new-api v0.0.0;key sk-qOd3…)。2026-10-10 实测 31 发 30 个 200(唯一 400 是故意
+    // 发的非法 quality;10 并发零抖动):与 yuanshudian25 / synoralink25 同一后端(裸壳、浮动 usage 带 reasoning_tokens、
+    // 图床 cdn.jd23kjs.work、`Provider API error:` 前缀、1000×1000 → 992²、n=2 只返 1 张、auto → 1312×1199),但:
+    //  - **flare 与 sunburst 都是 OpenAI OpCo 原生签名**(softwareAgent API/gpt-image,原始编码;sunburst 不是 Adobe);
+    //  - 五档真兑现(延迟 low 22s / medium 22s / high 42–44s / xhigh 48–50s / max 76–81s / sunburst max 188–198s,
+    //    4K PNG 体积随档上升);尺寸全如实含 2880²/4K;透明真 RGBA;webp 真返;edits 通。
+    //  - 计费按张一口价:flare 0.864、sunburst 1.02「单位」/张(账单接口 1/100 QuotaUnit;该站 quota_per_unit 500000,
+    //    单位是 $ 还是 ¥ 待 operator 按充值核实)—— 任一单位都比同后端元数点($0.09)便宜 10 倍以上。
+    // 【全量线(operator 2026-10-10 拍板)】不设 qualities。毛病全由现有逻辑兜(n 补齐、壳自合成、url 拉回重试)。
+    yobox25: {
+        baseUrl: 'https://max.yoboxai.com',
+        brand: /\byobox\s?ai\b|\byobox\b|\bjd23kjs\b|provider api error:?\s*|\badobe\b|\bfirefly\b/gi,
+        models: GPT_IMAGE_25_MODELS,
+    },
     qimg25: {
         baseUrl: 'https://qimg.cc',
         brand: /\bqimg\b|\b10k pool\b|pre-signed-firefly[a-z0-9.-]*|s3-accelerate[a-z0-9.-]*|\badobe\b|\bfirefly\b/gi,
