@@ -421,6 +421,24 @@ export const IMAGE_PROVIDERS: Record<string, ImageProvider> = {
     //    在入口拦,否则 #504 后 451 会变成终态 moderation_blocked 错误交给客户。
     //  - webp 被忽略返 PNG(适配器按字节 sniff 回显);1000×1000 上游正确 400;延迟 26–92s 偏慢。
     //  计费:openAllTiers 显式尺寸按请求尺寸合成官方账单(low 196 / medium 1756 / high 7024…),与上游 $0.06 无关。
+    // yobox:max.yoboxai.com(YoBoxAI,new-api v0.0.0;key sk-qOd3…)。2026-10-10 实测 gpt-image-2 29 发 24 个 200(5 败 =
+    // 3 发 `gpt-image-2-adobe` SKU 他家 Adobe 渠道挂 + 透明不支持 + 故意发的非法 quality):
+    //  - **24/24 OpenAI OpCo 签名,softwareAgent `API/gpt-image-2`**(真 2.0 API 款,原始编码);
+    //  - **三档真兑现,high 是真 high**:延迟 low 17–26s / medium 47–48s / high 120–151s(与官方 89–117s 同量级;
+    //    9 家里除 we-token 外首次);4K low 边缘比 5.0(软)vs high 2.7;
+    //  - **`size:auto` → 1122×1402 = 官方 2.0 auto 缺省尺寸**(官 key 实测值)—— 官方 API 直通的强指纹;
+    //  - 尺寸 1536×1024 / 1024×1536 / 1344×1008 / 2048² / 2880² / 4K 全如实;webp 真返;edits 通;n=2 只返 1 张(适配器
+    //    扇出);1000×1000 → 992²;非法 xhigh → 400(2.0 词表正确);上游 usage 浮动(2.5 式记账)→ 适配器自算。
+    //  - **透明 → 上游 400 `Transparent background is not supported for this model`**(明拒不伪装)→ noTransparentBackground。
+    //  - 计费按档一口价:low 0.72 / medium ~0.72 / high 0.864「单位」/张,与尺寸无关(单位 $ 或 ¥ 待 operator 核实;
+    //    若 $,high 对官方 1024² $0.21 = 0.04×)。
+    // 【全量线(operator 2026-10-10 拍板)】openAllTiers,quality 原样透传,显式尺寸按请求尺寸计费。
+    yobox: {
+        baseUrl: 'https://max.yoboxai.com',
+        brand: /\byobox\s?ai\b|\byobox\b|\bjd23kjs\b|provider api error:?\s*|\bone_hub(?:_error)?\b|\badobe\b|\bfirefly\b/gi,
+        openAllTiers: true,
+        noTransparentBackground: true,
+    },
     pixellelabs: {
         baseUrl: 'https://api.pixellelabs.com',
         brand: /\bpixelle\s?labs?\b|\bERR-[0-9A-F]{6,}\b|\bfirefly\b/gi,
