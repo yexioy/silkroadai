@@ -141,4 +141,26 @@ export const IMAGE_PROVIDERS_25: Record<string, ImageProvider25> = {
         brand: /\bsynoralink\b|\bjd23kjs\b|provider api error:?\s*|\badobe\b|\bfirefly\b/gi,
         models: GPT_IMAGE_25_MODELS,
     },
+    // qimg25:qimg.cc(new-api rc.30 外套自研号池层,错误码 `ERR-XXXX` / `pool_upstream_unavailable`),key sk-G99w…。
+    // 2026-10-09 实测 2.5:= Adobe Firefly Services 中转 OpenAI —— **flare 返 OpenAI OpCo 原生签名**(softwareAgent
+    // API/gpt-image,原始编码单 IDAT,Adobe 原样转发 OpenAI 字节),**sunburst 返 Adobe 签名**(modelVersions
+    // gpt-image-2.5-prism)→ 由 stripAdobeImageMetadataB64 按内容剥。图床 = Firefly S3 预签名 url(会过期,
+    // fetchImageAsB64 拉回;透明请求才 b64)。
+    //  - 五档全兑现(第二轮密排小字报纸题复核:延迟 medium 27s / high 40s / xhigh 75s / max 75s 单调,4K PNG 体积
+    //    13.2→15.9MB 单调,4K 裁片四档肉眼可分)。⚠️ 它的 usage 记账用 2.0 三档词表:high 记 7024、xhigh/max 不认识记
+    //    1756,非法值 400 文案也只列 low/medium/high —— 第一轮曾据此误判「xhigh/max 降档」,是错的。适配器自合成
+    //    usage,不受影响;quality 原样透传即可。
+    //  - 尺寸 1536×1024 / 1024×1536 / 2880² / 4K 全如实;auto → 1024²、回显 quality=medium、size 空串(适配器自合成);
+    //    透明真 RGBA;webp 被忽略;n=2 只返 1 张(n 补齐段兜);1000×1000 → 1008²(入口尺寸校验拦);edits 通、输入
+    //    token 报 0(自算)。
+    //  - 计费 = 按张一口价:flare $0.05(单发 low/max 各 +5 美分)、sunburst 约 $0.07。对官方 $30/M:low 8.5× /
+    //    medium 3.8× / high 0.95× / xhigh 0.53× / max 0.24×。
+    //  - 稳定性:同站 2.0 key 的「10k pool」自 10-09 07:57Z 起整池挂 >1 天;2.5 池首发也出过一次 18s 的
+    //    `10k pool upstream unavailable`(503,走通用 failover)。
+    // 【全量线(operator 2026-10-10 拍板)】不设 qualities。
+    qimg25: {
+        baseUrl: 'https://qimg.cc',
+        brand: /\bqimg\b|\b10k pool\b|pre-signed-firefly[a-z0-9.-]*|s3-accelerate[a-z0-9.-]*|\badobe\b|\bfirefly\b/gi,
+        models: GPT_IMAGE_25_MODELS,
+    },
 };
