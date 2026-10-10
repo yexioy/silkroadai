@@ -1722,6 +1722,93 @@ describe('frimodelmedium provider(frimodel 新账号,onlyQualities=[medium] + up
     });
 });
 
+describe('yobox provider(真 OpenAI API 直通 2.0,全量 openAllTiers + 透明拒)', () => {
+    const URL_YB = 'http://portal.test/image-adapter/yobox/v1/images/generations';
+    const gen = (body: Record<string, unknown>) =>
+        handleAdapterImage(
+            jsonReq(URL_YB, { model: 'gpt-image-2', prompt: 'x', size: '1024x1024', ...body }),
+            'generations',
+            'yobox',
+        );
+
+    it('registry:max.yoboxai.com、openAllTiers、无 sizes/upstreamQuality/gateMinCt/upstreamModel、透明拒;brand 抹品牌与 one_hub', () => {
+        const p = IMAGE_PROVIDERS.yobox;
+        expect(p.baseUrl).toBe('https://max.yoboxai.com');
+        expect(p.openAllTiers).toBe(true);
+        expect(p.sizes).toBeUndefined();
+        expect(p.upstreamQuality).toBeUndefined();
+        expect(p.gateMinCt).toBeUndefined();
+        expect(p.upstreamModel).toBeUndefined();
+        expect(p.noTransparentBackground).toBe(true);
+        expect('YoBoxAI one_hub_error cdn.jd23kjs.work firefly'.replace(p.brand, '*')).toBe('* * cdn.*.work *');
+        expect('Provider API error: Bad request'.replace(p.brand, '')).toBe('Bad request');
+    });
+
+    it('三档 + 任意尺寸全放行,quality 原样透传,按请求尺寸与档合成官方账单(上游浮动 usage 丢弃)', async () => {
+        for (const [size, q] of [
+            ['1024x1024', 'low'],
+            ['1024x1024', 'medium'],
+            ['1024x1024', 'high'],
+            ['1536x1024', 'high'],
+            ['1344x1008', 'low'],
+            ['3840x2160', 'high'],
+        ] as const) {
+            fetchMock.mockReset();
+            okUpstream();
+            const res = await gen({ size, quality: q });
+            expect(res.status).toBe(200);
+            const [url, init] = fetchMock.mock.calls[0];
+            expect(url).toBe('https://max.yoboxai.com/v1/images/generations');
+            const sent = JSON.parse(init.body as string);
+            expect(sent.model).toBe('gpt-image-2');
+            expect(sent.quality).toBe(q);
+            const [w, h] = size.split('x').map(Number);
+            const body = await res.json();
+            expect(body.quality).toBe(q);
+            expect(body.size).toBe(size);
+            expect(body.usage.output_tokens).toBe(officialOutputTokens(w, h, q));
+        }
+    });
+
+    it('size=auto 原样透传(openAllTiers),返图 1122×1402(官方缺省)按实际尺寸计费 + 回显', async () => {
+        fetchMock.mockImplementation(
+            async () =>
+                new Response(JSON.stringify({ created: 1, data: [{ b64_json: pngB64(1122, 1402) }] }), {
+                    status: 200,
+                    headers: { 'content-type': 'application/json' },
+                }),
+        );
+        const res = await gen({ size: 'auto', quality: 'low' });
+        expect(res.status).toBe(200);
+        const sent = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+        expect(sent.size).toBe('auto');
+        const body = await res.json();
+        expect(body.size).toBe('1122x1402');
+        expect(body.usage.output_tokens).toBe(officialOutputTokens(1122, 1402, 'low'));
+    });
+
+    it('透明请求 → 503 让路不打上游(上游明拒 Transparent background is not supported)', async () => {
+        okUpstream();
+        const res = await gen({ quality: 'low', background: 'transparent' });
+        expect(res.status).toBe(503);
+        expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('上游 503 one_hub_error → 503 中性体不泄品牌', async () => {
+        fetchMock.mockResolvedValue(
+            new Response(
+                JSON.stringify({
+                    error: { code: 'one_hub_error', message: 'The service is temporarily unavailable. (yobox)' },
+                }),
+                { status: 503 },
+            ),
+        );
+        const res = await gen({ quality: 'high' });
+        expect(res.status).toBe(503);
+        expect(await res.text()).not.toMatch(/yobox|one_hub/i);
+    });
+});
+
 describe('pixellelabs provider(尺寸白名单 + high→medium 上游替换、回显/计费仍按 high)', () => {
     const URL_PX = 'http://portal.test/image-adapter/pixellelabs/v1/images/generations';
     const gen = (body: Record<string, unknown>) =>
