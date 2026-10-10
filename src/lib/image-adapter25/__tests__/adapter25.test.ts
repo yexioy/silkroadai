@@ -1166,6 +1166,105 @@ describe('synoralink25 全量线(与 yuanshudian25 同后端、独立账号池 �
     });
 });
 
+describe('yobox25 全量线(同后端 yuanshudian/synoralink;flare+sunburst 全 OpenAI 签名)', () => {
+    const URL_Y = 'http://portal.test/image-adapter25/yobox25/v1/images/generations';
+
+    it('registry:max.yoboxai.com、两模型、无 qualities(全量);brand 抹 yobox / 图床域 / Provider API error 前缀', () => {
+        const p = IMAGE_PROVIDERS_25.yobox25;
+        expect(p.baseUrl).toBe('https://max.yoboxai.com');
+        expect(p.models).toEqual(GPT_IMAGE_25_MODELS);
+        expect(p.qualities).toBeUndefined();
+        expect('YoBoxAI yobox cdn.jd23kjs.work Adobe'.replace(p.brand, '*')).toBe('* * cdn.*.work *');
+        expect('Provider API error: Invalid value'.replace(p.brand, '')).toBe('Invalid value');
+        // 与同后端两条线是独立 provider(各自渠道 key / base_url)
+        expect(
+            new Set([p.baseUrl, IMAGE_PROVIDERS_25.yuanshudian25.baseUrl, IMAGE_PROVIDERS_25.synoralink25.baseUrl])
+                .size,
+        ).toBe(3);
+    });
+
+    it('5 档 + auto × 两模型原样透传,按官方档计费 —— 上游浮动 usage 被丢弃', async () => {
+        for (const [q, expectTokens] of [
+            ['low', 196],
+            ['medium', 439],
+            ['high', 1756],
+            ['xhigh', 3122],
+            ['max', 7024],
+            ['auto', 196],
+        ] as const) {
+            for (const model of GPT_IMAGE_25_MODELS) {
+                fetchMock.mockReset();
+                fetchMock.mockImplementation(
+                    async () =>
+                        new Response(
+                            JSON.stringify({
+                                created: 1,
+                                data: [{ b64_json: pngB64(1024, 1024) }],
+                                usage: {
+                                    input_tokens: 6,
+                                    output_tokens: 8195,
+                                    output_tokens_details: { reasoning_tokens: 0 },
+                                },
+                            }),
+                            { status: 200, headers: { 'content-type': 'application/json' } },
+                        ),
+                );
+                const res = await handleAdapter25Image(
+                    jsonReq(URL_Y, { model, prompt: 'x', size: '1024x1024', quality: q }),
+                    'generations',
+                    'yobox25',
+                );
+                expect(res.status).toBe(200);
+                expect(String(fetchMock.mock.calls[0][0])).toBe('https://max.yoboxai.com/v1/images/generations');
+                const sent = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body));
+                expect(sent.model).toBe(model);
+                if (q) expect(sent.quality).toBe(q);
+                expect(((await res.json()) as { usage: { output_tokens: number } }).usage.output_tokens).toBe(
+                    expectTokens,
+                );
+            }
+        }
+    });
+
+    it('上游 400 `Provider API error: …` → 终态 400 透出原因、抹前缀与品牌;上游 503 → 503 中性体', async () => {
+        fetchMock.mockResolvedValue(
+            new Response(
+                JSON.stringify({
+                    error: { message: 'Provider API error: invalid image size: edges must be multiples of 16 (yobox)' },
+                }),
+                { status: 400 },
+            ),
+        );
+        const r1 = await handleAdapter25Image(
+            jsonReq(URL_Y, { model: 'gpt-image-2.5-flare', prompt: 'x', size: '1024x1024', quality: 'low' }),
+            'generations',
+            'yobox25',
+        );
+        expect(r1.status).toBe(400);
+        const msg = ((await r1.json()) as { error: { message: string } }).error.message;
+        expect(msg.toLowerCase()).not.toMatch(/yobox|provider api error/);
+        expect(msg).toContain('edges must be multiples of 16');
+
+        fetchMock.mockResolvedValue(
+            new Response(
+                JSON.stringify({
+                    error: { message: 'The service is temporarily unavailable. (yobox)', code: 'one_hub_error' },
+                }),
+                {
+                    status: 503,
+                },
+            ),
+        );
+        const r2 = await handleAdapter25Image(
+            jsonReq(URL_Y, { model: 'gpt-image-2.5-flare', prompt: 'x', size: '1024x1024', quality: 'max' }),
+            'generations',
+            'yobox25',
+        );
+        expect(r2.status).toBe(503);
+        expect(await r2.text()).not.toMatch(/yobox/i);
+    });
+});
+
 describe('qimg25 全量线(Firefly 中转:flare OpenAI 原生签名、sunburst Adobe 签名;url 为 Firefly S3 预签名)', () => {
     const URL_Q = 'http://portal.test/image-adapter25/qimg25/v1/images/generations';
     /** 带 caBX(C2PA)块的最小 PNG。 */
