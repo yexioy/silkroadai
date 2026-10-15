@@ -577,13 +577,15 @@ describe('proMax 2.5 判定(2026-08-08)', () => {
         expect(variantForModel('seedance-2-5')).toBe('2.5');
         expect(variantForModel('seedance-2-0-promax')).toBe('promax');
         expect(regionForModel('seedance-2-5-promax')).toBe('promax');
-        // MODEL_MAP:仅 720p/1080p × {无ref,-ref},上游 artsdance2-5-intl-260628,region promax
-        for (const n of ['seedance2.5-promax-720p', 'seedance2.5-promax-1080p-ref']) {
+        // MODEL_MAP:480p/720p/1080p × {无ref,-ref}(480p 2026-10-15 随 svcinf 上游重开),回落上游 artsdance2-5-intl-260628,
+        // svcinf 上游 dreamina-seedance-2-5-260628-max,region promax
+        for (const n of ['seedance2.5-promax-480p', 'seedance2.5-promax-720p', 'seedance2.5-promax-1080p-ref']) {
             expect(MODEL_MAP[n].variant).toBe('promax-2.5');
             expect(MODEL_MAP[n].upstream).toBe('artsdance2-5-intl-260628');
+            expect(MODEL_MAP[n].provider).toBe('svcinf');
+            expect(MODEL_MAP[n].svcinfModel).toBe('dreamina-seedance-2-5-260628-max');
             expect(MODEL_MAP[n].region).toBe('promax');
         }
-        expect(MODEL_MAP['seedance2.5-promax-480p']).toBeUndefined();
         expect(MODEL_MAP['seedance2.5-promax-4k']).toBeUndefined();
     });
 });
@@ -1100,6 +1102,10 @@ describe('海外版 proMax 全档 → service-inference.ai dreamina(独立 key /
     afterEach(() => vi.unstubAllEnvs());
 
     it.each([
+        ['seedance2.0-promax-480p', 'dreamina-seedance-2-0-260128-max', '480p'],
+        ['seedance2.0-promax-fast-480p', 'dreamina-seedance-2-0-fast-260128-max', '480p'],
+        ['seedance2.0-promax-mini-480p', 'dreamina-seedance-2-0-mini-260615-max', '480p'],
+        ['seedance2.5-promax-480p', 'dreamina-seedance-2-5-260628-max', '480p'],
         ['seedance2.0-promax-720p', 'dreamina-seedance-2-0-260128-max', '720p'],
         ['seedance2.0-promax-1080p', 'dreamina-seedance-2-0-260128-max', '1080p'],
         ['seedance2.0-promax-4k', 'dreamina-seedance-2-0-260128-max', '4k'],

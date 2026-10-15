@@ -96,8 +96,9 @@ export function getSvcinfCnConfig(): SvcinfConfig | null {
 
 // ── 海外版 proMax → service-inference.ai dreamina-sd-max 线(2026-10-15,operator 指定换上游,对客模型/价格不变)──
 // 上游文档 console.service-inference.ai/docs/seedance-max:四档套餐名(以该 key `GET /v1/models` 为准,
-// 部分套餐不带 -max 后缀 → 按档 env 覆盖)。pro 480p/720p/1080p/4k、fast/mini 480p/720p、2.5 480p/720p/1080p;
-// 对客档位表(MODEL_MAP)【不扩】—— 价格/模型不变是本次前提,480p 重开另议。
+// 部分套餐不带 -max 后缀 → 按档 env 覆盖)。pro 480p/720p/1080p/4k、fast/mini 480p/720p、2.5 480p/720p/1080p
+// —— proMax 480p 档随之重开(operator 2026-10-15 拍板;费率 = 各自 720p 同价,沿用 2026-08-06 口径)。
+// ⚠️ 480p 只有新上游支持:未配 key 回落 artsmcp 时 480p 会被 intl 上游 400(回落是应急路径,可接受)。
 const UPSTREAM_SVCINF_PROMAX_PRO = process.env.SEEDANCE_SVCINF_PROMAX_MODEL_PRO || 'dreamina-seedance-2-0-260128-max';
 const UPSTREAM_SVCINF_PROMAX_FAST =
     process.env.SEEDANCE_SVCINF_PROMAX_MODEL_FAST || 'dreamina-seedance-2-0-fast-260128-max';
@@ -233,9 +234,9 @@ export const MODEL_MAP: Record<string, SeedanceModelSpec> = {
             ]),
         ),
     ),
-    // ── 海外版 proMax seedance 2.5(2026-08-08):intl 新代模型,仅 720p/1080p,费率独立(按原价挂牌)──
+    // ── 海外版 proMax seedance 2.5(2026-08-08):费率独立(按原价挂牌);2026-10-15 换 svcinf 上游后加 480p ──
     ...Object.fromEntries(
-        (['720p', '1080p'] as const).flatMap((resolution) =>
+        (['480p', '720p', '1080p'] as const).flatMap((resolution) =>
             [false, true].map((ref) => [
                 `seedance2.5-promax-${resolution}${ref ? '-ref' : ''}`,
                 {
@@ -267,14 +268,15 @@ export const MODEL_MAP: Record<string, SeedanceModelSpec> = {
             ]),
         ),
     ),
-    // ── 海外版proMax(promax,2026-07-23):费率独立;pro 720p/1080p/4k,fast/mini 720p(档位表不扩)。
-    //    2026-10-15 起上游 = service-inference.ai dreamina-seedance-*-max(有 key 才切,否则回落 artsdance intl)──
+    // ── 海外版proMax(promax,2026-07-23):费率独立;pro 480p/720p/1080p/4k,fast/mini 480p/720p。
+    //    2026-10-15 起上游 = service-inference.ai dreamina-seedance-*-max(有 key 才切,否则回落 artsdance intl),
+    //    480p 档随新上游重开(artsdance intl 无 480p 时期曾去掉)──
     ...Object.fromEntries(
         (
             [
-                ['promax', UPSTREAM_PROMAX_PRO, UPSTREAM_SVCINF_PROMAX_PRO, ['720p', '1080p', '4k']],
-                ['promax-fast', UPSTREAM_PROMAX_FAST, UPSTREAM_SVCINF_PROMAX_FAST, ['720p']],
-                ['promax-mini', UPSTREAM_PROMAX_MINI, UPSTREAM_SVCINF_PROMAX_MINI, ['720p']],
+                ['promax', UPSTREAM_PROMAX_PRO, UPSTREAM_SVCINF_PROMAX_PRO, ['480p', '720p', '1080p', '4k']],
+                ['promax-fast', UPSTREAM_PROMAX_FAST, UPSTREAM_SVCINF_PROMAX_FAST, ['480p', '720p']],
+                ['promax-mini', UPSTREAM_PROMAX_MINI, UPSTREAM_SVCINF_PROMAX_MINI, ['480p', '720p']],
             ] as Array<[SeedanceVariant, string, string, Array<'480p' | '720p' | '1080p' | '4k'>]>
         ).flatMap(([variant, upstream, svcinfModel, resolutions]) =>
             resolutions.flatMap((resolution) =>
