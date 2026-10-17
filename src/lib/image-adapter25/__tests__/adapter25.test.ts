@@ -479,6 +479,8 @@ describe('handleAdapter25Image 透明 / 错误 / 脱敏', () => {
         }
     });
 
+    // 请求 size 用 16 倍数(过得了入口校验),上游文案是 mock —— 这条测的是【上游 400 的原因透出】,
+    // 非 16 倍数的入口拦截见下面「显式 size 边长非 16 倍数」一组。
     it('上游非法尺寸 400 → 终态 invalid_request,且【透出上游具体原因】+ param=size(客户能定位)', async () => {
         fetchMock.mockResolvedValue(
             new Response(
@@ -489,11 +491,12 @@ describe('handleAdapter25Image 透明 / 错误 / 脱敏', () => {
             ),
         );
         const res = await handleAdapter25Image(
-            jsonReq(URL_GEN, { model: 'gpt-image-2.5-flare', prompt: 'x', size: '1000x1000', quality: 'low' }),
+            jsonReq(URL_GEN, { model: 'gpt-image-2.5-flare', prompt: 'x', size: '1024x1024', quality: 'low' }),
             'generations',
             'wetokenasia25',
         );
         expect(res.status).toBe(400);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
         const e = ((await res.json()) as { error: { code: string; message: string; param: string | null } }).error;
         expect(e.code).toBe('invalid_request');
         expect(e.message).toContain('edges must be multiples of 16'); // 具体原因透出,不再笼统
@@ -511,11 +514,12 @@ describe('handleAdapter25Image 透明 / 错误 / 脱敏', () => {
             ),
         );
         const res = await handleAdapter25Image(
-            jsonReq(URL_GEN, { model: 'gpt-image-2.5-flare', prompt: 'x', size: '15x15', quality: 'low' }),
+            jsonReq(URL_GEN, { model: 'gpt-image-2.5-flare', prompt: 'x', size: '16x16', quality: 'low' }),
             'generations',
             'wetokenasia25',
         );
         expect(res.status).toBe(400);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
         const msg = ((await res.json()) as { error: { message: string } }).error.message.toLowerCase();
         expect(msg).not.toContain('we-token');
         expect(msg).toContain('edges must be multiples of 16'); // 具体原因保留
@@ -547,6 +551,105 @@ describe('handleAdapter25Image 透明 / 错误 / 脱敏', () => {
             expect(res.status).toBe(200);
             expect(fetchMock).toHaveBeenCalledTimes(1); // 放行打上游
         }
+    });
+
+    // 2026-10-01:官方 / we-token 对非 16 倍数边长回 400;号池类上游(yuanshudian25 / zdchat25 / ominiapi25)
+    // 不拒、静默出 992² / 1024²(prod 实测 yuanshudian25 1000x1000 → 200、回显 992x992)。入口统一按官方文案拒。
+    describe('显式 size 边长非 16 倍数 → 入口 400 param=size,不打上游', () => {
+        const PROVIDERS = ['wetokenasia25', 'yuanshudian25', 'zdchat25', 'ominiapi25'];
+        for (const size of ['1000x1000', '1024x1000', '1000x1024']) {
+            it(`generations ${size} → 400(四条线一致)`, async () => {
+                for (const p of PROVIDERS) {
+                    fetchMock.mockReset();
+                    okUpstream([pngB64(992, 992)]);
+                    const res = await handleAdapter25Image(
+                        jsonReq(`http://portal.test/image-adapter25/${p}/v1/images/generations`, {
+                            model: 'gpt-image-2.5-flare',
+                            prompt: 'x',
+                            size,
+                            quality: 'low',
+                        }),
+                        'generations',
+                        p,
+                    );
+                    expect(res.status).toBe(400);
+                    expect(fetchMock).not.toHaveBeenCalled();
+                    const e = (
+                        (await res.json()) as {
+                            error: { type: string; code: string; message: string; param: string | null };
+                        }
+                    ).error;
+                    expect(e.type).toBe('invalid_request_error');
+                    expect(e.code).toBe('invalid_request');
+                    expect(e.param).toBe('size');
+                    expect(e.message).toBe(`invalid image size: edges must be multiples of 16 (got "${size}")`);
+                }
+            });
+        }
+
+        it('edits(multipart)1000x1000 → 同样 400,不打上游', async () => {
+            const res = await handleAdapter25Image(
+                formReq(URL_EDIT, { model: 'gpt-image-2.5-flare', prompt: 'x', size: '1000x1000', quality: 'low' }, [
+                    TINY_PNG,
+                ]),
+                'edits',
+                'wetokenasia25',
+            );
+            expect(res.status).toBe(400);
+            expect(fetchMock).not.toHaveBeenCalled();
+            const e = ((await res.json()) as { error: { message: string; param: string | null } }).error;
+            expect(e.param).toBe('size');
+            expect(e.message).toBe('invalid image size: edges must be multiples of 16 (got "1000x1000")');
+        });
+
+        it('非法 quality 与非法 size 同时出现 → 先报 quality(入口 400 顺序不变)', async () => {
+            const res = await handleAdapter25Image(
+                jsonReq(URL_GEN, { model: 'gpt-image-2.5-flare', prompt: 'x', size: '1000x1000', quality: 'ultra' }),
+                'generations',
+                'wetokenasia25',
+            );
+            expect(res.status).toBe(400);
+            expect(fetchMock).not.toHaveBeenCalled();
+            expect(((await res.json()) as { error: { param: string } }).error.param).toBe('quality');
+        });
+
+        it('16 倍数的显式 size(1024x1024 / 1536x1024 / 3840x2160)照常打上游,size 原样透传', async () => {
+            for (const size of ['1024x1024', '1536x1024', '3840x2160']) {
+                fetchMock.mockReset();
+                const [w, h] = size.split('x').map(Number);
+                okUpstream([pngB64(w, h)]);
+                const res = await handleAdapter25Image(
+                    jsonReq(URL_GEN, { model: 'gpt-image-2.5-flare', prompt: 'x', size, quality: 'low' }),
+                    'generations',
+                    'wetokenasia25',
+                );
+                expect(res.status).toBe(200);
+                expect(fetchMock).toHaveBeenCalledTimes(1);
+                const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+                expect((JSON.parse(String(init.body)) as { size: string }).size).toBe(size);
+                expect(((await res.json()) as { size: string }).size).toBe(size);
+            }
+        });
+
+        it('size=auto / 缺省 不受影响:照常打上游(模型自选画幅,返图可以不是 16 倍数)', async () => {
+            for (const size of ['auto', undefined]) {
+                fetchMock.mockReset();
+                okUpstream([pngB64(1254, 1254)]);
+                const res = await handleAdapter25Image(
+                    jsonReq(URL_GEN, {
+                        model: 'gpt-image-2.5-flare',
+                        prompt: 'x',
+                        quality: 'low',
+                        ...(size ? { size } : {}),
+                    }),
+                    'generations',
+                    'wetokenasia25',
+                );
+                expect(res.status).toBe(200);
+                expect(fetchMock).toHaveBeenCalledTimes(1);
+                expect(((await res.json()) as { size: string }).size).toBe('1254x1254');
+            }
+        });
     });
 
     it('渠道特定(no available channel / 5xx)→ 503 failover,体中性不泄品牌', async () => {
