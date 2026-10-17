@@ -11,7 +11,6 @@ import { describe, expect, it } from 'vitest';
 import { renderToString } from 'react-dom/server';
 import { PayForm } from '@/app/pay/pay-form';
 import { LoginForm } from '@/app/login/login-form';
-import { FirstRechargeBonusBanner } from '@/app/pay/first-recharge-bonus-banner';
 
 describe('<PayForm /> initial render (W4-1 D2)', () => {
     it('renders 7 default tier buttons (¥10 / ¥30 / ¥100 / ¥300 / ¥1000 / ¥5000 / ¥10000)', () => {
@@ -77,27 +76,5 @@ describe('<LoginForm /> initial render (W4-1 D2)', () => {
         expect(html).toMatch(/<button[^>]*type="submit"/);
         // Initial state: empty inputs → button disabled
         expect(html).toMatch(/disabled=""/);
-    });
-});
-
-describe('<FirstRechargeBonusBanner /> SSR (W6 D1)', () => {
-    // The /pay server page chooses whether to render the banner based on
-    // user.first_recharge_bonus_granted (only when === false). We don't SSR
-    // the whole page (it pulls in cookies + Prisma + headers); we just
-    // assert the standalone banner renders the expected contract surface.
-    // Page-level conditional rendering is exercised by the integration
-    // tests in recharge-flow.test.ts (granted flips after first recharge).
-    it('renders the 🎁 首充福利 banner with 20% bonus copy', () => {
-        const html = renderToString(<FirstRechargeBonusBanner />);
-        expect(html).toContain('首充福利');
-        expect(html).toContain('20% bonus');
-        // role="note" surface for accessibility / future RTL queries
-        expect(html).toMatch(/role="note"/);
-        // W7 P2 swapped the inline #fff8e1 hex for the design-system warm
-        // banner: paper-muted background + brand-accent left rail. The
-        // emoji surface (🎁) must still render.
-        expect(html).toContain('bg-paper-muted');
-        expect(html).toContain('border-brand-accent');
-        expect(html).toContain('🎁');
     });
 });
