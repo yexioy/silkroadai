@@ -3,7 +3,7 @@
  *
  * No jsdom + RTL infrastructure exists yet, so these are deliberately
  * shallow:  use react-dom/server to render the components to HTML and
- * scan the markup for the contract surface (5 tier buttons, custom amount
+ * scan the markup for the contract surface (7 tier buttons, custom amount
  * input, provider radios, OAuth links). Interactivity is left to D3
  * manual smoke + future RTL adoption.
  */
@@ -14,11 +14,11 @@ import { LoginForm } from '@/app/login/login-form';
 import { FirstRechargeBonusBanner } from '@/app/pay/first-recharge-bonus-banner';
 
 describe('<PayForm /> initial render (W4-1 D2)', () => {
-    it('renders 5 default tier buttons (¥10 / ¥30 / ¥100 / ¥300 / ¥1000)', () => {
+    it('renders 7 default tier buttons (¥10 / ¥30 / ¥100 / ¥300 / ¥1000 / ¥5000 / ¥10000)', () => {
         const html = renderToString(<PayForm enabledPaymentTypes={['alipay', 'wxpay']} />);
         // React 19 SSR inserts <!-- --> between adjacent text nodes
         // (¥ literal + interpolated number), so match the digit literal alone.
-        for (const tier of [10, 30, 100, 300, 1000]) {
+        for (const tier of [10, 30, 100, 300, 1000, 5000, 10000]) {
             expect(html).toMatch(new RegExp(`>\\s*¥(<!-- -->)?${tier}\\s*<`));
         }
     });
