@@ -180,6 +180,7 @@ silkroadai/
 ### 2026-10 维护线(客户报障修复)
 
 - [x] 参考音频门控对齐火山官方 ✅(2026-10-21,PR #554 merge `0ff135a`,server1 seedance-portal ×3 + portal 已滚动)— 客户 zhixiang 10-20 调企业门户 `/api/v3` 提交 Seedance 2.0「2 参考视频 + 1 参考音频、无图」被我们 400 `audio requires at least one reference image`。火山官方(docs.volcengine.com/docs/82379/1520757):2.0 系「不可单独输入音频,应至少包含 1 个参考视频**或**图片」,「文本 + 视频 + 音频」是受支持组合;2.5 可纯音频。`cn-adapter.ts` 与主站海外线 `adapter.ts` 的门控都只数图不数视频 → 改成「无图 && 无视频」才拒,2.5 / promax-2.5 允许纯音频(`AUDIO_ONLY_VARIANTS`);/docs 7 处文案同步。+4 测试,全套 282 files / 4019 pass。**真金 smoke(throwaway 账号,已软删)**:客户原请求原样提交 → `cgt-20261021055008-an05a` 9.5 分钟 completed,成片 834×1120 5.09s 含 AAC 音轨;上游 usage 361,632 token(带参考视频的任务比纯 5s 720p 的 ~109k 高 ~3.3×,按 ¥28/M 实扣 ¥10.13)。volc 线无此门控不涉及。
+- [x] 样片出正片(draft_task)放行海外 global / proMax 2.5 线 + 修 CI Type Check 红 ✅(2026-10-23,PR #560 merge `f9009e1`,server1 seedance-portal ×3 逐副本滚动)— 客户 zhixiang 报 `seedance-2-5-global` 样片(`draft:true`)正常出片,第二步 `draft_task` 被 400「仅 seedance-2-5 支持」。根因:`cn-adapter.ts` 样片出正片分支的门是 `map.variant !== '2.5'`,而 global / promax 2.5 条目为同价复用 `variant:'promax-2.5'`(2026-08-31),#528/#536 两线切 svcinf 后没回头放开;门后还写死 cn 线(`getSvcinfCnConfig` + doubao 套餐名)—— svcinf 任务按 key 隔离,拿 cn key 查 global 样片是 404,上游也要求正片 model 与样片相同。修:`DRAFT_TASK_VARIANTS={'2.5','promax-2.5'}`,key / 套餐名按 `map.region` 取**出样片那条线**(`svcinfConfigForRegion` + `map.svcinfModel`),cn 线行为不变;上游 -max 线本就支持 draft(seedance-max.md §4);/docs 文案三条 2.5 线均可、正片须与样片同模型 / 渠道。+5 测试(global 1080p/720p、promax 1080p 走本线 key + 真号替换;2.0 → 400;global 未配 key → 503 不借 cn key),全套 285 files / 4060 pass。**真金 e2e 过**(用客户已完成样片 `cgt-20261022131948-y2j76` + 临时 global key,已删;¥12.608914 已冲正):正片 `cgt-20261023091019-czpo1` 45s completed,ffprobe 1920×1080 / 24fps / 4.04s / 无音轨(沿用样片 `generate_audio=false`),DB `draft_task_id` 落库,计费 196,425 token × 80.24/M × 0.8 精确。顺带:main CI Type Check 自 #558 起红(vendored `icon-wan.tsx` import `./wan.png`,CI 的 tsc 无 next-env.d.ts 链)→ `src/types/assets.d.ts` 加 `*.png` 声明修绿。
 
 ### /keys 额度上限 + 到期时间(2026-10-22)
 
@@ -677,4 +678,4 @@ APP_PORT=3002
 ---
 
 **版本**: 2.4
-**最后更新**: 2026-10-21(seedance 参考音频门控对齐火山官方 #554)
+**最后更新**: 2026-10-23(样片出正片放行 global / proMax 2.5 线 #560)
