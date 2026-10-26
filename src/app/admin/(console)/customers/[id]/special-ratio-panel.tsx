@@ -22,6 +22,7 @@ interface State {
 }
 interface SaveResult {
     userGroup: string;
+    tokensPinned?: number;
     verifiedOk: boolean | null;
     verified: Record<string, number> | null;
 }
@@ -113,12 +114,13 @@ export function SpecialRatioPanel({ customerId, isDark, card, sectionTitle, mute
                 setDraft(d);
             }
             const r = data.result;
-            if (r?.verifiedOk === true) setSaveMsg(`已生效:用户分组 ${r.userGroup},以客户身份回读倍率一致`);
+            const pinned = r?.tokensPinned ? `;${r.tokensPinned} 把未指定档次的 key 已钉成 default` : '';
+            if (r?.verifiedOk === true) setSaveMsg(`已生效:用户分组 ${r.userGroup},以客户身份回读倍率一致${pinned}`);
             else if (r?.verifiedOk === false)
                 setSaveErr(
                     `已写入,但以客户身份回读的倍率不一致:${JSON.stringify(r.verified)}。请到 new-api 后台核对矩阵`,
                 );
-            else setSaveMsg(`已写入:用户分组 ${r?.userGroup ?? ''}(未能回读验证,客户无访问令牌)`);
+            else setSaveMsg(`已写入:用户分组 ${r?.userGroup ?? ''}(未能回读验证,客户无访问令牌)${pinned}`);
         } catch (err) {
             setSaveErr(err instanceof Error ? err.message : '网络错误');
         } finally {

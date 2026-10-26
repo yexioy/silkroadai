@@ -1,7 +1,15 @@
 import 'server-only';
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
-import { getOption, getPricingGroupRatiosForCustomer, getUser, putOption, updateUser } from './client';
+import {
+    getOption,
+    getPricingGroupRatiosForCustomer,
+    getUser,
+    listTokensForCustomer,
+    putOption,
+    updateTokenForCustomer,
+    updateUser,
+} from './client';
 import { getGroupRatios } from '@/lib/channel-group';
 import { invalidateEffectiveRatioCache } from './effective-group-ratios';
 
@@ -19,6 +27,14 @@ import { invalidateEffectiveRatioCache } from './effective-group-ratios';
  *     quota 不受影响;但 display_name/remark 不传会被清空 → 先 GET 再带原值 PUT。
  *     分组变更会 bump auth_version 并吊销该用户 new-api 网页登录会话;PAT 不受影响(实测 + 源码)。
  *  3. 写完以客户身份读 `/api/pricing` 回读有效倍率做验证,结果连同 DB 留痕一起返回。
+ *  4. 令牌分组为空('')的 key 在 new-api 里是"跟随用户分组"(middleware/auth.go:usingGroup = userGroup),
+ *     用户一旦进了 `vip-<username>` 这种**没有任何渠道**的分组,这些 key 的每次请求都会 503
+ *     「无可用渠道」。线上 557 把启用中的 key 分组为空(521 个用户)。所以改分组之前先把它们
+ *     钉成当前实际生效的分组(通常 `default`),行为不变,再动用户分组。
+ *
+ * 可见性(operator 2026-10-26 问):`vip-<username>` 从不写进 `UserUsableGroups` / `GroupRatio`,
+ * 其它用户看不到它(new-api `GetUserUsableGroups` 只会把**自己的**用户分组自动补进自己的可用列表,
+ * 描述 "User group");客户本人在 `/api/pricing.usable_group` 里会看到自己这一项,广场代理把它滤掉。
  */
 
 export const USER_GROUP_DEFAULT = 'default';
@@ -58,7 +74,8 @@ export class CustomerRatioError extends Error {
             | 'account_not_provisioned'
             | 'unknown_group'
             | 'invalid_ratio'
-            | 'newapi_user_unreadable',
+            | 'newapi_user_unreadable'
+            | 'token_pin_failed',
         message: string,
     ) {
         super(message);
@@ -223,6 +240,8 @@ export interface SetCustomerRatiosResult {
     userGroup: string;
     previousGroup: string | null;
     matrixRow: Record<string, number>;
+    /** 本次被钉成显式分组的空分组 key 数(规则 4)。 */
+    tokensPinned: number;
     /** 以客户身份回读 /api/pricing 的有效倍率(仅覆盖的组);读不到 → null。 */
     verified: Record<string, number> | null;
     verifiedOk: boolean | null;
@@ -270,6 +289,23 @@ export async function setCustomerRatios(
     const matrixRow: Record<string, number> = {};
     for (const i of inputs) matrixRow[i.newapi_group] = Math.round(i.ratio * 10000) / 10000;
 
+    // 0) 规则 4:进专属分组前,把分组为空(跟随用户分组)的 key 钉成当前实际生效的分组。
+    //    之前在 default → 钉 default;之前已在 vip*(样例 vip / 旧 vip-xxx,都无渠道)→ 钉 default。
+    let tokensPinned = 0;
+    if (targetGroup !== USER_GROUP_DEFAULT) {
+        const pinGroup = previousGroup.startsWith('vip') ? USER_GROUP_DEFAULT : previousGroup;
+        if (!user.newapi_access_token) {
+            throw new CustomerRatioError(
+                'token_pin_failed',
+                'customer has no new-api access token; cannot pin group-less keys before moving the user group',
+            );
+        }
+        tokensPinned = await pinGroupLessTokens(
+            { accessToken: user.newapi_access_token, userId: user.newapi_user_id },
+            pinGroup,
+        );
+    }
+
     // 1) 矩阵(两键同写)。只收拾 vip-<username> 这类一对一分组的旧行;其它用户分组一律不碰。
     const matrix = await readMatrix();
     if (previousGroup !== targetGroup && previousGroup.startsWith('vip-')) delete matrix[previousGroup];
@@ -303,6 +339,7 @@ export async function setCustomerRatios(
                     user_group: targetGroup,
                     previous_group: previousGroup,
                     overrides: matrixRow,
+                    tokens_pinned: tokensPinned,
                     changed_by: updatedBy,
                 },
             },
@@ -335,7 +372,35 @@ export async function setCustomerRatios(
             console.warn(`[customer-ratio] post-write verification failed for ${user.newapi_username}:`, err);
         }
     }
-    return { userGroup: targetGroup, previousGroup, matrixRow, verified, verifiedOk };
+    return { userGroup: targetGroup, previousGroup, matrixRow, tokensPinned, verified, verifiedOk };
+}
+
+const TOKEN_PAGE_SIZE = 100;
+const TOKEN_MAX_PAGES = 50;
+
+/**
+ * 把客户所有分组为空的 key 钉成 `pinGroup`(显式),返回改了几把。
+ * `auto` 与已显式指定分组的 key 不碰。任何一把失败即抛 token_pin_failed(宁可拒绝保存,也不让路由断)。
+ */
+async function pinGroupLessTokens(auth: { accessToken: string; userId: number }, pinGroup: string): Promise<number> {
+    const targets: Array<{ id: number; name: string }> = [];
+    try {
+        for (let page = 1; page <= TOKEN_MAX_PAGES; page++) {
+            const { items, total } = await listTokensForCustomer(auth, page, TOKEN_PAGE_SIZE);
+            for (const t of items) if ((t.group ?? '') === '') targets.push({ id: t.id, name: t.name });
+            if (items.length < TOKEN_PAGE_SIZE || page * TOKEN_PAGE_SIZE >= total) break;
+        }
+        for (const t of targets) {
+            await updateTokenForCustomer(auth, t.id, { group: pinGroup });
+            console.info(`[customer-ratio] pinned group-less token ${t.id} (${t.name}) → ${pinGroup}`);
+        }
+    } catch (err) {
+        throw new CustomerRatioError(
+            'token_pin_failed',
+            `failed to pin group-less keys to ${pinGroup}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+    }
+    return targets.length;
 }
 
 export interface RatioDrift {

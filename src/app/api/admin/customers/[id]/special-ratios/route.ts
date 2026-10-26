@@ -75,7 +75,11 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
     } catch (err) {
         if (err instanceof CustomerRatioError) {
             const status =
-                err.code === 'account_not_provisioned' ? 409 : err.code === 'newapi_user_unreadable' ? 502 : 400;
+                err.code === 'account_not_provisioned'
+                    ? 409
+                    : err.code === 'newapi_user_unreadable' || err.code === 'token_pin_failed'
+                      ? 502
+                      : 400;
             return NextResponse.json({ error: err.code, message: err.message }, { status });
         }
         console.error(`[admin/special-ratios PUT] ${id}:`, err);

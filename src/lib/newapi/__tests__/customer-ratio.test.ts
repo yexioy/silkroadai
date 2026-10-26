@@ -5,12 +5,16 @@ const mockPutOption = vi.fn();
 const mockGetUser = vi.fn();
 const mockUpdateUser = vi.fn();
 const mockPricingRatios = vi.fn();
+const mockListTokens = vi.fn();
+const mockUpdateToken = vi.fn();
 vi.mock('../client', () => ({
     getOption: (...a: unknown[]) => mockGetOption(...a),
     putOption: (...a: unknown[]) => mockPutOption(...a),
     getUser: (...a: unknown[]) => mockGetUser(...a),
     updateUser: (...a: unknown[]) => mockUpdateUser(...a),
     getPricingGroupRatiosForCustomer: (...a: unknown[]) => mockPricingRatios(...a),
+    listTokensForCustomer: (...a: unknown[]) => mockListTokens(...a),
+    updateTokenForCustomer: (...a: unknown[]) => mockUpdateToken(...a),
 }));
 const mockGetGroupRatios = vi.fn();
 vi.mock('@/lib/channel-group', () => ({ getGroupRatios: (...a: unknown[]) => mockGetGroupRatios(...a) }));
@@ -69,6 +73,8 @@ beforeEach(() => {
     mockGetOption.mockResolvedValue(JSON.stringify({ vip: { 'oai image 2': 1.7 } }));
     mockPutOption.mockResolvedValue(undefined);
     mockUpdateUser.mockResolvedValue(undefined);
+    mockListTokens.mockResolvedValue({ items: [], total: 0 });
+    mockUpdateToken.mockResolvedValue(undefined);
     tx.customerRatioOverride.deleteMany.mockResolvedValue({});
     tx.customerRatioOverride.createMany.mockResolvedValue({});
     tx.user.update.mockResolvedValue({});
@@ -203,5 +209,87 @@ describe('getCustomerRatioState', () => {
         const st = await getCustomerRatioState('u-1');
         expect(st.drift).toBe(false);
         expect(st.overrides).toEqual([]);
+    });
+});
+
+describe('setCustomerRatios — 规则 4:进专属分组前钉住分组为空的 key(2026-10-26)', () => {
+    const OVERRIDE = [{ newapi_group: 'oai image 2', ratio: 1.7 }];
+    const tok = (id: number, group: string) => ({ id, name: `t${id}`, group });
+
+    it('pins group-less keys to the previous (routable) group BEFORE moving the user group; explicit / auto untouched', async () => {
+        mockPricingRatios.mockResolvedValue({ 'oai image 2': 1.7 });
+        mockListTokens.mockResolvedValue({
+            items: [tok(1, ''), tok(2, 'oai image 2'), tok(3, 'auto'), tok(4, '')],
+            total: 4,
+        });
+        const order: string[] = [];
+        mockUpdateToken.mockImplementation(async () => {
+            order.push('token');
+        });
+        mockUpdateUser.mockImplementation(async () => {
+            order.push('user');
+        });
+        const r = await setCustomerRatios('u-1', OVERRIDE, 'admin-1');
+        expect(r.tokensPinned).toBe(2);
+        expect(mockListTokens).toHaveBeenCalledWith({ accessToken: 'nap_pat', userId: 1907 }, 1, 100);
+        expect(mockUpdateToken.mock.calls.map((c) => [c[1], c[2]])).toEqual([
+            [1, { group: 'default' }],
+            [4, { group: 'default' }],
+        ]);
+        expect(order).toEqual(['token', 'token', 'user']);
+        const props = (tx.analyticsEvent.create.mock.calls[0][0] as { data: { properties: Record<string, unknown> } })
+            .data.properties;
+        expect(props.tokens_pinned).toBe(2);
+    });
+
+    it('a customer already parked in the sample `vip` group (no channels) gets group-less keys pinned to default, not vip', async () => {
+        mockGetUser.mockResolvedValue({ ...LIVE_USER, group: 'vip' });
+        mockPricingRatios.mockResolvedValue({ 'oai image 2': 1.7 });
+        mockListTokens.mockResolvedValue({ items: [tok(9, '')], total: 1 });
+        const r = await setCustomerRatios('u-1', OVERRIDE, 'admin-1');
+        expect(r.previousGroup).toBe('vip');
+        expect(mockUpdateToken).toHaveBeenCalledWith({ accessToken: 'nap_pat', userId: 1907 }, 9, { group: 'default' });
+    });
+
+    it('walks every page of the token list', async () => {
+        mockPricingRatios.mockResolvedValue({ 'oai image 2': 1.7 });
+        const page1 = Array.from({ length: 100 }, (_, i) => tok(i + 1, 'default'));
+        mockListTokens
+            .mockResolvedValueOnce({ items: page1, total: 101 })
+            .mockResolvedValueOnce({ items: [tok(101, '')], total: 101 });
+        const r = await setCustomerRatios('u-1', OVERRIDE, 'admin-1');
+        expect(mockListTokens).toHaveBeenCalledTimes(2);
+        expect(mockListTokens.mock.calls[1][1]).toBe(2);
+        expect(r.tokensPinned).toBe(1);
+    });
+
+    it('a pin failure aborts the save before any matrix / user-group write (token_pin_failed)', async () => {
+        mockListTokens.mockResolvedValue({ items: [tok(1, '')], total: 1 });
+        mockUpdateToken.mockRejectedValue(new Error('new-api 500'));
+        await expect(setCustomerRatios('u-1', OVERRIDE, 'admin-1')).rejects.toMatchObject({
+            code: 'token_pin_failed',
+        });
+        expect(mockPutOption).not.toHaveBeenCalled();
+        expect(mockUpdateUser).not.toHaveBeenCalled();
+        expect(tx.customerRatioOverride.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it('refuses to move a customer without an access token (cannot inspect their keys)', async () => {
+        mockUserFindUnique.mockResolvedValue({ ...PORTAL_USER, newapi_access_token: null });
+        await expect(setCustomerRatios('u-1', OVERRIDE, 'admin-1')).rejects.toMatchObject({
+            code: 'token_pin_failed',
+        });
+        expect(mockUpdateUser).not.toHaveBeenCalled();
+    });
+
+    it('clearing overrides (back to default) never touches keys', async () => {
+        mockGetUser.mockResolvedValue({ ...LIVE_USER, group: 'vip-c-db420d6d' });
+        mockGetOption.mockResolvedValue(JSON.stringify({ 'vip-c-db420d6d': { 'oai image 2': 1.7 } }));
+        mockPricingRatios.mockResolvedValue({ ...GLOBAL });
+        const r = await setCustomerRatios('u-1', [], 'admin-1');
+        expect(r.userGroup).toBe('default');
+        expect(r.tokensPinned).toBe(0);
+        expect(mockListTokens).not.toHaveBeenCalled();
+        expect(mockUpdateToken).not.toHaveBeenCalled();
     });
 });

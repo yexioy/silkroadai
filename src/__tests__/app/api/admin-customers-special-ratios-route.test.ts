@@ -113,6 +113,8 @@ describe('/api/admin/customers/[id]/special-ratios', () => {
         expect((await PUT(put({ overrides: [] }), { params })).status).toBe(409);
         mockSet.mockRejectedValueOnce(new CustomerRatioError('newapi_user_unreadable', 'x'));
         expect((await PUT(put({ overrides: [] }), { params })).status).toBe(502);
+        mockSet.mockRejectedValueOnce(new CustomerRatioError('token_pin_failed', 'x'));
+        expect((await PUT(put({ overrides: [] }), { params })).status).toBe(502);
         mockSet.mockRejectedValueOnce(new Error('boom'));
         expect((await PUT(put({ overrides: [] }), { params })).status).toBe(502);
     });
