@@ -1,8 +1,10 @@
 import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
-import { headers } from 'next/headers';
 import './globals.css';
 import { Footer } from '@/components/Footer';
+import { htmlLang } from '@/lib/i18n';
+import { LocaleProvider } from '@/lib/i18n/client';
+import { getLocale } from '@/lib/i18n/server';
 
 /**
  * Inter loaded once at the root layout — applies to every route in the
@@ -38,20 +40,21 @@ export default async function RootLayout({
 }: Readonly<{
     children: React.ReactNode;
 }>) {
-    const headerStore = await headers();
-    const pathname = headerStore.get('x-pathname') || '';
-    const search = headerStore.get('x-search') || '';
-    const locale = new URLSearchParams(search).get('lang')?.trim().toLowerCase() === 'en' ? 'en' : 'zh';
-    const htmlLang = locale === 'en' ? 'en' : 'zh-CN';
+    // Site locale: portal_locale cookie → Accept-Language → zh. Server components
+    // call getLocale() themselves; client islands read <LocaleProvider>. See
+    // src/lib/i18n/README.md.
+    const locale = await getLocale();
 
     // W5 D5: body is a column flex so Footer pins to bottom even on short
     // pages. The wrapper div around children takes flex: 1 so its content
     // (which often has its own min-height: 100vh) still fills the viewport.
     return (
-        <html lang={htmlLang} data-pathname={pathname} className={inter.variable}>
+        <html lang={htmlLang(locale)} className={inter.variable}>
             <body className="antialiased" style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
-                <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>{children}</div>
-                <Footer />
+                <LocaleProvider locale={locale}>
+                    <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>{children}</div>
+                    <Footer locale={locale} />
+                </LocaleProvider>
             </body>
         </html>
     );
