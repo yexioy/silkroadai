@@ -30,11 +30,10 @@ import { pickMessages } from '@/lib/i18n';
 import { getLocale } from '@/lib/i18n/server';
 import { commonMessages } from '@/lib/i18n/messages/common';
 
-export const metadata = {
-    title: '集成文档 — Silk Road AI',
-    description:
-        'Silk Road AI 一键集成文档:Cursor、Cline、Continue、Claude Code Desktop、OpenAI Codex(CLI / IDE 插件 / 桌面 app)、Python / Node SDK。OpenAI / Anthropic 兼容协议,5 分钟接入。',
-};
+export async function generateMetadata() {
+    const m = pickMessages(commonMessages, await getLocale());
+    return { title: m.docs.pageTitle, description: m.docs.pageDescription };
+}
 
 interface AgentSection {
     id: string;

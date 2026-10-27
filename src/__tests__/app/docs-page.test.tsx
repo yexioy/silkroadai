@@ -155,9 +155,9 @@ describe('/docs page — W7 D4 PR-H Tier B common-errors section', () => {
 });
 
 describe('/docs page — page-level metadata', () => {
-    it('exposes a Chinese title + description in the metadata export', async () => {
+    it('exposes a Chinese title + description via generateMetadata (default locale)', async () => {
         const mod = await import('@/app/docs/page');
-        const meta = mod.metadata;
+        const meta = await mod.generateMetadata();
         expect(meta.title).toContain('集成文档');
         expect(typeof meta.description).toBe('string');
         expect((meta.description as string).length).toBeGreaterThan(20);

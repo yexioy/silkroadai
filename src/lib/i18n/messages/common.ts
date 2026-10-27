@@ -69,12 +69,16 @@ export const commonMessages = defineMessages(
             serverErrorTitle: '服务暂不可用',
             serverErrorBody: '我们已收到错误,请稍后重试。',
             errorId: '错误编号:',
+            notFoundPageTitle: '页面没找到 — Silk Road AI',
         },
         legal: {
             languageNotice:
                 'This document is published in Chinese. The Chinese text is the legally binding version; an English translation is in preparation.',
         },
         docs: {
+            pageTitle: '集成文档 — Silk Road AI',
+            pageDescription:
+                'Silk Road AI 一键集成文档:Cursor、Cline、Continue、Claude Code Desktop、OpenAI Codex(CLI / IDE 插件 / 桌面 app)、Python / Node SDK。OpenAI / Anthropic 兼容协议,5 分钟接入。',
             languageNotice:
                 'Integration docs are currently in Chinese. Base URLs, model names and code samples are language-independent — an English edition is in progress.',
         },
@@ -148,12 +152,16 @@ export const commonMessages = defineMessages(
             serverErrorTitle: 'Service temporarily unavailable',
             serverErrorBody: 'The error has been recorded — please try again shortly.',
             errorId: 'Error ID:',
+            notFoundPageTitle: 'Page not found — Silk Road AI',
         },
         legal: {
             languageNotice:
                 'This document is published in Chinese. The Chinese text is the legally binding version; an English translation is in preparation.',
         },
         docs: {
+            pageTitle: 'Integration Docs — Silk Road AI',
+            pageDescription:
+                'Connect Cursor, Cline, Continue, Claude Code, OpenAI Codex (CLI / IDE / desktop) and the Python / Node SDKs to Silk Road AI. OpenAI- and Anthropic-compatible — set up in 5 minutes.',
             languageNotice:
                 'Integration docs are currently in Chinese. Base URLs, model names and code samples are language-independent — an English edition is in progress.',
         },

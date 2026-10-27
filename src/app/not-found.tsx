@@ -15,9 +15,10 @@ import { Card } from '@/components/ui/Card';
 import { getMessages } from '@/lib/i18n/server';
 import { commonMessages } from '@/lib/i18n/messages/common';
 
-export const metadata = {
-    title: '页面没找到 — Silk Road AI',
-};
+export async function generateMetadata() {
+    const m = await getMessages(commonMessages);
+    return { title: m.errors.notFoundPageTitle };
+}
 
 export default async function NotFound() {
     const m = await getMessages(commonMessages);
