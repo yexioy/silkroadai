@@ -25,7 +25,7 @@ import { ModelConsumptionChartLazy } from './model-consumption-chart-lazy';
 import { CallDetailTable, type CallRow } from './call-detail-table';
 import { matchFailedVideoConsumes } from './failed-video-match';
 import { collapseRetriedFailures, sanitizeLogContent } from './format';
-import { isPerImageBilled, parseCacheTokens } from '@/lib/newapi/log-display';
+import { isPerImageBilled, mergeTaskSettlements, parseCacheTokens, parseTaskUsage } from '@/lib/newapi/log-display';
 import { periodToRange, type UsagePeriod } from './period';
 import type { Locale } from '@/lib/i18n';
 import type { DashboardMessages } from '@/lib/i18n/messages/dashboard';
@@ -108,6 +108,9 @@ export interface UsageData {
 
 function toCallRow(log: NewApiUsageLog, locale: Locale): CallRow {
     const cache = parseCacheTokens(log.other);
+    // 任务插件行(seedance 等视频按 token 计费)token 列恒 0,真实用量在 other.usage_facts.tokens
+    // (视频 token 全是"输出"侧)→ 填进 completionTokens,否则客户看到「没有 token 消耗」。
+    const task = parseTaskUsage(log.other);
     return {
         id: log.id,
         createdAt: log.created_at,
@@ -119,7 +122,7 @@ function toCallRow(log: NewApiUsageLog, locale: Locale): CallRow {
         // 不转的话 56 秒的生图会显示成 "56ms"。
         useTimeMs: log.use_time * 1000,
         promptTokens: log.prompt_tokens,
-        completionTokens: log.completion_tokens,
+        completionTokens: task.tokens > 0 ? task.tokens : log.completion_tokens,
         // 缓存读写(参照 new-api 显示;Anthropic 面 prompt_tokens 不含缓存,单列才说得清费用)
         cacheReadTokens: cache.read,
         cacheWriteTokens: cache.write,
@@ -201,7 +204,10 @@ export async function loadUsageData(args: {
     // 折叠"失败了但重试 / failover 成功"的中间失败行(见 collapseRetriedFailures)——
     // 否则客户日志被 429/上游饱和这类中间过程刷屏,主观以为出了大问题。真失败(内容拒绝等)照常显示。
     const visibleErrors = collapseRetriedFailures(consume, errors);
-    const calls = [...consume, ...visibleErrors]
+    // 任务插件「预扣 + 结算」两行并成一行(金额 = 最终实扣、token = 真实值);退差额的结算行在 type=6 里。
+    // 必须在 matchFailedVideoConsumes 之后 —— 失败配对靠预扣行的原始 quota。
+    const mergedConsume = mergeTaskSettlements(consume, taskFailed);
+    const calls = [...mergedConsume, ...visibleErrors]
         .sort((a, b) => b.created_at - a.created_at)
         .slice(0, CALLS_CAP)
         .map((l) => {

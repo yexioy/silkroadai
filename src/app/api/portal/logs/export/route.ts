@@ -28,7 +28,9 @@ import {
     collapseRetriedFailures,
     sanitizeLogContent,
     isPerImageBilled,
+    mergeTaskSettlements,
     parseCacheTokens,
+    parseTaskUsage,
 } from '@/lib/newapi/log-display';
 
 export const runtime = 'nodejs';
@@ -111,6 +113,9 @@ type CsvSourceLog = Pick<
 function toCsvRow(log: CsvSourceLog): string {
     const perImage = isPerImageBilled(log.other, log.model_name);
     const cache = parseCacheTokens(log.other);
+    // 任务插件行(视频按 token)列恒 0,真实 token 在 other.usage_facts.tokens → 输出 Tokens 列
+    const task = parseTaskUsage(log.other);
+    const completionTokens = task.tokens > 0 ? task.tokens : log.completion_tokens;
     return [
         BEIJING_TIME.format(new Date(log.created_at * 1000)),
         log.model_name || '',
@@ -119,7 +124,7 @@ function toCsvRow(log: CsvSourceLog): string {
         log.use_time, // new-api use_time 是【秒】
         // 按张计费(生图 ModelPrice)时 token 是噪声,与日志页 "—" 同语义 → 留空
         perImage ? '' : log.prompt_tokens,
-        perImage ? '' : log.completion_tokens,
+        perImage ? '' : completionTokens,
         // 缓存读写与页面同语义:按张计费留空;0 也如实写 0(CSV 是对账口径,不藏)
         perImage ? '' : cache.read,
         perImage ? '' : cache.write,
@@ -168,6 +173,10 @@ interface DbLogRow {
  *          (见 log-display.isAdapterFailoverNoise 的安全性论证)。
  * 两条 EXISTS 分别吃 idx_logs_request_id / idx_created_at_type,失败行占比小,代价可控;
  * 规则 3 是纯行内字符串判断,先于 EXISTS 短路掉大量行,反而更快。
+ *
+ * 任务插件(seedance 等)的「预扣 + 结算」两行按批内合并成一行(mergeTaskSettlements):SQL 额外带上
+ * type=6 里的【退差额结算行】(`other` 含 actual_quota)只作配对用,**不写进 CSV**;全额退款行(失败任务)
+ * 不取。预扣与结算同一任务相隔几分钟,几乎总落在同一批(5000 行);极少数跨批 → 两行各自输出(金额仍对账)。
  */
 function exportFromLogsDb(pool: Pool, newapiUserId: number, q: z.infer<typeof QuerySchema>): Response {
     const encoder = new TextEncoder();
@@ -187,7 +196,7 @@ function exportFromLogsDb(pool: Pool, newapiUserId: number, q: z.infer<typeof Qu
                                 use_time, prompt_tokens, completion_tokens, quota, type, content, other
                            FROM logs l
                           WHERE l.user_id = $1
-                            AND l.type IN (2, 5)
+                            AND (l.type IN (2, 5) OR (l.type = 6 AND l.other LIKE '%"actual_quota"%'))
                             AND ($2::bigint IS NULL OR l.created_at >= $2)
                             AND ($3::bigint IS NULL OR l.created_at <= $3)
                             AND ($4::text   IS NULL OR l.model_name = $4)
@@ -220,23 +229,26 @@ function exportFromLogsDb(pool: Pool, newapiUserId: number, q: z.infer<typeof Qu
                         ],
                     );
                     if (rows.length === 0) break;
+                    const batch: CsvSourceLog[] = rows.map((r) => ({
+                        created_at: Number(r.created_at),
+                        model_name: r.model_name ?? '',
+                        token_name: r.token_name ?? '',
+                        request_id: r.request_id ?? '',
+                        use_time: Number(r.use_time),
+                        prompt_tokens: Number(r.prompt_tokens),
+                        completion_tokens: Number(r.completion_tokens),
+                        quota: Number(r.quota),
+                        type: Number(r.type) as NewApiUsageLog['type'],
+                        content: r.content ?? '',
+                        other: r.other ?? '',
+                    }));
+                    // 批内合并任务「预扣 + 结算」;type=6 退差额结算行只参与配对,不输出
+                    const merged = mergeTaskSettlements(
+                        batch.filter((l) => l.type !== 6),
+                        batch.filter((l) => l.type === 6),
+                    );
                     let chunk = '';
-                    for (const r of rows) {
-                        chunk +=
-                            toCsvRow({
-                                created_at: Number(r.created_at),
-                                model_name: r.model_name ?? '',
-                                token_name: r.token_name ?? '',
-                                request_id: r.request_id ?? '',
-                                use_time: Number(r.use_time),
-                                prompt_tokens: Number(r.prompt_tokens),
-                                completion_tokens: Number(r.completion_tokens),
-                                quota: Number(r.quota),
-                                type: Number(r.type) as NewApiUsageLog['type'],
-                                content: r.content ?? '',
-                                other: r.other ?? '',
-                            }) + '\r\n';
-                    }
+                    for (const l of merged) chunk += toCsvRow(l) + '\r\n';
                     controller.enqueue(encoder.encode(chunk));
                     lastId = rows[rows.length - 1].id;
                     if (rows.length < DB_BATCH_SIZE) break;
@@ -288,11 +300,13 @@ async function exportViaHttpPaging(
         return NextResponse.json({ error: 'fetch_failed' }, { status: 502 });
     }
 
-    // 与 /api/portal/logs 同一套:IDOR 二次过滤 + 只留 API 调用 + 折叠重试中间失败
+    // 与 /api/portal/logs 同一套:IDOR 二次过滤 + 只留 API 调用 + 折叠重试中间失败 + 任务预扣/结算合并
     const mine = items.filter((l) => l.user_id === newapiUserId && (l.type === 2 || l.type === 5));
-    const consume = mine.filter((l) => l.type === 2);
+    const refunds = items.filter((l) => l.user_id === newapiUserId && l.type === 6);
+    const rawConsume = mine.filter((l) => l.type === 2);
     const errors = mine.filter((l) => l.type === 5);
-    const visibleErrors = collapseRetriedFailures(consume, errors);
+    const visibleErrors = collapseRetriedFailures(rawConsume, errors);
+    const consume = mergeTaskSettlements(rawConsume, refunds);
     const rows = [...consume, ...visibleErrors].sort((a, b) => b.created_at - a.created_at).map(toCsvRow);
     if (truncated) rows.push(csvCell(TRUNCATED_NOTE));
 

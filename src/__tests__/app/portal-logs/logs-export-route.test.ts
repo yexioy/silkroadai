@@ -155,6 +155,43 @@ describe('GET /api/portal/logs/export', () => {
         expect(text).toContain('已达单次导出上限 10000 条');
     });
 
+    it('任务插件(seedance 视频按 token):预扣 + 结算并成一行,消耗 = 最终实扣、输出 Tokens = 真实值', async () => {
+        mockGetCurrentUser.mockResolvedValue(provisioned);
+        const submit = '{"is_task":true,"model_price":0,"task_id":"task_A","usage_facts":{"tokens":86400}}';
+        const settle =
+            '{"actual_quota":752764,"is_task":true,"model_price":0,"pre_consumed_quota":745200,"task_id":"task_A","usage_facts":{"tokens":87277}}';
+        mockQueryLogs.mockResolvedValue({
+            items: [
+                {
+                    ...makeLog({
+                        id: 2,
+                        created_at: 200,
+                        model_name: 'doubao-seedance-2-0-mini-260615',
+                        other: settle,
+                    }),
+                    quota: 7564,
+                },
+                {
+                    ...makeLog({
+                        id: 1,
+                        created_at: 100,
+                        model_name: 'doubao-seedance-2-0-mini-260615',
+                        other: submit,
+                    }),
+                    quota: 745200,
+                },
+            ],
+            total: 2,
+        });
+        const text = await (await GET(req())).text();
+        const lines = text.trimEnd().split('\r\n');
+        expect(lines).toHaveLength(2); // 表头 + 1(两行并一)
+        const cells = lines[1].split(',');
+        expect(cells[5]).toBe('0'); // 输入 Tokens
+        expect(cells[6]).toBe('87277'); // 输出 Tokens = 真实值(不再是空 / 0)
+        expect(cells[9]).toBe((752764 / 100000).toFixed(4)); // 消耗 = actual_quota(mock quotaToCny = /100000)
+    });
+
     it('IDOR:别人 user_id 的行不出现在 CSV', async () => {
         mockGetCurrentUser.mockResolvedValue(provisioned);
         mockQueryLogs.mockResolvedValue({
@@ -315,6 +352,43 @@ describe('GET /api/portal/logs/export — 日志库直连主路径(全量,无 10
         const secondCursor = (mockPoolQuery.mock.calls[1][1] as unknown[])[7];
         expect(firstCursor).toBe('9223372036854775807'); // int8 max 起步
         expect(secondCursor).toBe('5001'); // batch1 末行 id(10000-4999)
+    });
+
+    it('SQL 带上 type=6 退差额结算行(仅 actual_quota 的)用于配对;批内合并后 type=6 行不写进 CSV', async () => {
+        mockGetCurrentUser.mockResolvedValue(provisioned);
+        const submit = '{"is_task":true,"model_price":0,"task_id":"task_B","usage_facts":{"tokens":120000}}';
+        const refundSettle =
+            '{"actual_quota":1878042,"is_task":true,"model_price":0,"pre_consumed_quota":4647375,"task_id":"task_B","usage_facts":{"tokens":108872}}';
+        mockPoolQuery.mockResolvedValueOnce({
+            rows: [
+                makeDbRow({
+                    id: 3,
+                    type: 6,
+                    model_name: 'doubao-seedance-2-0-260128',
+                    other: refundSettle,
+                    quota: 2769333,
+                }),
+                makeDbRow({
+                    id: 2,
+                    model_name: 'doubao-seedance-2-0-260128',
+                    other: submit,
+                    quota: 4647375,
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                }),
+                makeDbRow({ id: 1 }),
+            ],
+        });
+        const res = await GET(req());
+        const text = new TextDecoder().decode(new Uint8Array(await res.arrayBuffer()));
+        const sql = mockPoolQuery.mock.calls[0][0] as string;
+        expect(sql).toMatch(/l\.type = 6 AND l\.other LIKE '%"actual_quota"%'/);
+        const lines = text.trimEnd().split('\r\n');
+        expect(lines).toHaveLength(3); // 表头 + 合并后的任务行 + claude 行(type=6 不输出)
+        const task = lines[1].split(',');
+        expect(task[6]).toBe('108872'); // 输出 Tokens = 真实值
+        expect(task[9]).toBe((1878042 / 100000).toFixed(4)); // 消耗 = actual_quota
+        expect(text).not.toContain('2769333');
     });
 
     it('DB 查询抛错 → 流以 error 终止(客户端下载失败而不是拿到残缺文件当完整),连接仍归还', async () => {

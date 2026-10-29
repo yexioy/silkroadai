@@ -187,6 +187,75 @@ describe('GET /api/portal/logs', () => {
         expect(byId[2]).toBe(true); // gemini 生图按张 → "—"
     });
 
+    it('任务插件(seedance 视频按 token):预扣 + 结算两行并成一行,¥ = 最终实扣、输出 token = 真实值,不藏', async () => {
+        mockGetCurrentUser.mockResolvedValue(provisioned);
+        const submit =
+            '{"group_ratio":0.75,"is_task":true,"model_price":0,"task_id":"task_A","usage_facts":{"resolution":"720p","tokens":86400,"video_input":"none"}}';
+        const settle =
+            '{"actual_quota":752764,"is_task":true,"model_price":0,"pre_consumed_quota":745200,"task_id":"task_A","usage_facts":{"resolution":"720p","tokens":87277,"video_input":"none"}}';
+        mockQueryLogs.mockResolvedValue({
+            items: [
+                {
+                    ...makeLog({
+                        id: 2,
+                        created_at: 200,
+                        model_name: 'doubao-seedance-2-0-mini-260615',
+                        other: settle,
+                        content: 'Settled by the task usage expression',
+                    }),
+                    quota: 7564,
+                },
+                {
+                    ...makeLog({
+                        id: 1,
+                        created_at: 100,
+                        model_name: 'doubao-seedance-2-0-mini-260615',
+                        other: submit,
+                        content: 'Action text_to_video',
+                    }),
+                    quota: 745200,
+                },
+            ],
+            total: 2,
+        });
+        const d = (await (await GET(req())).json()) as {
+            rows: Array<{
+                id: number;
+                quota: number;
+                promptTokens: number;
+                completionTokens: number;
+                perImageBilled: boolean;
+            }>;
+        };
+        expect(d.rows).toHaveLength(1);
+        expect(d.rows[0]).toMatchObject({
+            id: 1,
+            quota: 752764,
+            promptTokens: 0,
+            completionTokens: 87277,
+            perImageBilled: false,
+        });
+    });
+
+    it('任务插件退差额:结算行是 type=6 → 预扣行 ¥ 降到 actual_quota;type=6 本身不出现在 rows', async () => {
+        mockGetCurrentUser.mockResolvedValue(provisioned);
+        const submit = '{"is_task":true,"model_price":0,"task_id":"task_B","usage_facts":{"tokens":120000}}';
+        const refundSettle =
+            '{"actual_quota":1878042,"is_task":true,"model_price":0,"pre_consumed_quota":4647375,"task_id":"task_B","usage_facts":{"tokens":108872}}';
+        mockQueryLogs.mockResolvedValue({
+            items: [
+                { ...makeLog({ id: 2, type: 6, created_at: 200, other: refundSettle }), quota: 2769333 },
+                { ...makeLog({ id: 1, created_at: 100, other: submit }), quota: 4647375 },
+            ],
+            total: 2,
+        });
+        const d = (await (await GET(req())).json()) as {
+            rows: Array<{ id: number; quota: number; completionTokens: number }>;
+        };
+        expect(d.rows).toHaveLength(1);
+        expect(d.rows[0]).toMatchObject({ id: 1, quota: 1878042, completionTokens: 108872 });
+    });
+
     it('IDOR:别人 user_id 的行被过滤掉', async () => {
         mockGetCurrentUser.mockResolvedValue(provisioned);
         mockQueryLogs.mockResolvedValue({

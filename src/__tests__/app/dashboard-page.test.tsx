@@ -181,11 +181,16 @@ function makeLog(o: Partial<Record<string, unknown>> = {}) {
     };
 }
 
-/** Drive the two type-keyed queryLogs calls (type=2 consume, type=5 error). */
-function setLogs(consume: ReturnType<typeof makeLog>[], errors: ReturnType<typeof makeLog>[] = []) {
+/** Drive the type-keyed queryLogs calls (type=2 consume, type=5 error, type=6 视频任务退款). */
+function setLogs(
+    consume: ReturnType<typeof makeLog>[],
+    errors: ReturnType<typeof makeLog>[] = [],
+    taskFailed: ReturnType<typeof makeLog>[] = [],
+) {
     mockQueryLogs.mockImplementation(async ({ type }: { type: number }) => {
         if (type === 2) return { items: consume, total: consume.length };
         if (type === 5) return { items: errors, total: errors.length };
+        if (type === 6) return { items: taskFailed, total: taskFailed.length };
         return { items: [], total: 0 };
     });
 }
@@ -299,6 +304,54 @@ describe('<DashboardPage /> merged console — happy path', () => {
         // 客户要的两列:哪个 key(token_name)+ request id 逐行透传到明细表
         expect(html).toContain('prod-openai');
         expect(html).toContain('20260705REQ-consume-0001');
+    });
+
+    it('任务插件视频(seedance 按 token):预扣 + 结算并成一行,token 列显示真实值、¥ 为最终实扣;退差额在 type=6 也合并', async () => {
+        const submit = (taskId: string, tokens: number) =>
+            `{"group_ratio":0.75,"is_task":true,"model_price":0,"task_id":"${taskId}","usage_facts":{"resolution":"720p","tokens":${tokens},"video_input":"none"}}`;
+        const settle = (taskId: string, tokens: number, actual: number, pre: number) =>
+            `{"actual_quota":${actual},"is_task":true,"model_price":0,"pre_consumed_quota":${pre},"task_id":"${taskId}","usage_facts":{"resolution":"720p","tokens":${tokens},"video_input":"none"}}`;
+        const video = { model_name: 'doubao-seedance-2-0-mini-260615', prompt_tokens: 0, completion_tokens: 0 };
+        setLogs(
+            [
+                // 任务 A:预扣 745,200 + 补扣结算 7,564(type=2)→ 一行 ¥(752,764)/ 87,277 tokens
+                makeLog({
+                    ...video,
+                    id: 2,
+                    created_at: 1_700_000_200,
+                    quota: 7564,
+                    other: settle('task_A', 87277, 752764, 745200),
+                    content: 'Settled by the task usage expression',
+                }),
+                makeLog({ ...video, id: 1, created_at: 1_700_000_100, quota: 745200, other: submit('task_A', 86400) }),
+                // 任务 B:预扣 4,647,375,真实少于估算 → 退差额结算行在 type=6
+                makeLog({
+                    ...video,
+                    id: 3,
+                    created_at: 1_700_000_050,
+                    quota: 4647375,
+                    other: submit('task_B', 120000),
+                }),
+            ],
+            [],
+            [
+                makeLog({
+                    ...video,
+                    id: 9,
+                    type: 6,
+                    created_at: 1_700_000_300,
+                    quota: 2769333,
+                    other: settle('task_B', 108872, 1878042, 4647375),
+                }),
+            ],
+        );
+        const html = await renderPage({});
+        // quotaToCny mock:quota / 500000 × 7.2 … 这里只断言 token 与行数语义,金额由 route 测试覆盖
+        expect(html).toContain('0 / 87,277'); // 任务 A 真实 token(不是估算 86,400,也不是 "—")
+        expect(html).not.toContain('0 / 86,400');
+        expect(html).toContain('0 / 108,872'); // 任务 B 真实 token(来自 type=6 退差额结算行)
+        expect(html).not.toContain('0 / 120,000');
+        expect((html.match(/doubao-seedance-2-0-mini-260615/g) ?? []).length).toBe(2); // 两个任务 = 两行(结算行不单列)
     });
 
     it('renders preserved features: 充值流水 + 余额提醒设置', async () => {
