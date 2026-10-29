@@ -26,6 +26,12 @@ vi.mock('@/lib/newapi/client', () => ({
     fetchUserRefunds: (...args: unknown[]) => mockFetchUserRefunds(...args),
 }));
 
+// 任务插件 token 补查走日志库直连;默认未配置(null)→ 不补,现有断言不变。
+const mockGetNewapiLogsPool = vi.fn<() => unknown>(() => null);
+vi.mock('@/lib/newapi/logs-db', () => ({
+    getNewapiLogsPool: () => mockGetNewapiLogsPool(),
+}));
+
 const mockSentryCapture = vi.fn();
 vi.mock('@sentry/nextjs', () => ({
     captureException: (...args: unknown[]) => mockSentryCapture(...args),
@@ -47,6 +53,7 @@ beforeEach(() => {
     vi.clearAllMocks();
     mockCacheUpsert.mockResolvedValue({});
     mockFetchUserRefunds.mockResolvedValue([]); // 默认无退款 → 净=毛(现有断言不变)
+    mockGetNewapiLogsPool.mockReturnValue(null);
 });
 
 afterEach(async () => {
@@ -508,5 +515,82 @@ describe('USAGE_PERIODS contract', () => {
         expect(m.USAGE_PERIODS).toEqual(['7d', '30d', 'all', 'last_month']);
         const _periodCheck: UsagePeriod = '7d';
         expect(_periodCheck).toBe('7d');
+    });
+});
+
+describe('getUsageAggregate — 任务插件 token 补查(seedance 视频按 token,列恒 0,真实值在 usage_facts)', () => {
+    const NOW = new Date('2026-10-29T12:00:00Z');
+    const mockClientQuery = vi.fn();
+    const mockRelease = vi.fn();
+    const fakePool = {
+        connect: () => Promise.resolve({ query: (...a: unknown[]) => mockClientQuery(...a), release: mockRelease }),
+    };
+    const run = () =>
+        getUsageAggregate({
+            portalUserId: PORTAL_USER_ID,
+            newapiUserId: NEWAPI_USER_ID,
+            newapiUsername: NEWAPI_USERNAME,
+            period: '30d',
+            now: NOW,
+        });
+
+    beforeEach(() => {
+        mockCacheFindUnique.mockResolvedValue(null);
+        mockClientQuery.mockReset();
+        mockRelease.mockReset();
+        mockClientQuery.mockImplementation((sql: string) =>
+            Promise.resolve({ rows: sql.startsWith('WITH') ? [{ tokens: '261831' }] : [] }),
+        );
+    });
+
+    it('token_used 全 0 的模型作为候选 → 查日志库,结果加进 totalTokens;LLM 模型不在候选里', async () => {
+        mockGetNewapiLogsPool.mockReturnValue(fakePool);
+        mockGetUsageDashboard.mockResolvedValue([
+            makeRow({ model_name: 'doubao-seedance-2-0-mini-260615', count: 3, quota: 2_258_292, token_used: 0 }),
+            makeRow({ model_name: 'gpt-5.4', count: 10, quota: 200, token_used: 5_000 }),
+        ]);
+        const r = await run();
+        expect(r.totalTokens).toBe(5_000 + 261_831);
+        const dataCall = mockClientQuery.mock.calls.find((c) => (c[0] as string).startsWith('WITH'))!;
+        const params = dataCall[1] as unknown[];
+        expect(params[0]).toBe(NEWAPI_USER_ID);
+        expect(params[3]).toEqual(['doubao-seedance-2-0-mini-260615']); // 只查候选模型,不扫 LLM 行
+        expect(mockClientQuery.mock.calls.map((c) => c[0])).toEqual(
+            expect.arrayContaining(['BEGIN', expect.stringMatching(/^SET LOCAL statement_timeout/), 'COMMIT']),
+        );
+        expect(mockRelease).toHaveBeenCalledTimes(1);
+    });
+
+    it('没有候选模型(纯 LLM 客户)→ 不打日志库', async () => {
+        mockGetNewapiLogsPool.mockReturnValue(fakePool);
+        mockGetUsageDashboard.mockResolvedValue([makeRow({ model_name: 'gpt-5.4', token_used: 5_000 })]);
+        const r = await run();
+        expect(r.totalTokens).toBe(5_000);
+        expect(mockClientQuery).not.toHaveBeenCalled();
+    });
+
+    it('未配置日志库(本地 dev)→ totalTokens 只有 /api/data/ 的数', async () => {
+        mockGetUsageDashboard.mockResolvedValue([
+            makeRow({ model_name: 'doubao-seedance-2-0-mini-260615', token_used: 0 }),
+        ]);
+        expect((await run()).totalTokens).toBe(0);
+    });
+
+    it('补查失败(超时 / 坏 JSON)→ ROLLBACK + 归还连接 + 不影响其它汇总数', async () => {
+        mockGetNewapiLogsPool.mockReturnValue(fakePool);
+        mockClientQuery.mockImplementation((sql: string) =>
+            sql.startsWith('WITH')
+                ? Promise.reject(new Error('canceling statement due to statement timeout'))
+                : Promise.resolve({ rows: [] }),
+        );
+        mockGetUsageDashboard.mockResolvedValue([
+            makeRow({ model_name: 'doubao-seedance-2-0-mini-260615', count: 3, quota: 999, token_used: 0 }),
+        ]);
+        const r = await run();
+        expect(r.totalTokens).toBe(0);
+        expect(r.totalCalls).toBe(3);
+        expect(r.totalUsedQuota).toBe(999);
+        expect(mockClientQuery.mock.calls.map((c) => c[0])).toContain('ROLLBACK');
+        expect(mockRelease).toHaveBeenCalledTimes(1);
     });
 });

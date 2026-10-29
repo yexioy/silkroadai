@@ -24,7 +24,9 @@ import {
     collapseRetriedFailures,
     sanitizeLogContent,
     isPerImageBilled,
+    mergeTaskSettlements,
     parseCacheTokens,
+    parseTaskUsage,
 } from '@/lib/newapi/log-display';
 
 export const runtime = 'nodejs';
@@ -70,6 +72,7 @@ export interface LogRow {
 
 function toLogRow(log: NewApiUsageLog, locale: Locale): LogRow {
     const cache = parseCacheTokens(log.other);
+    const task = parseTaskUsage(log.other); // 任务插件行:真实 token 在 other.usage_facts.tokens(列恒 0)
     return {
         id: log.id,
         createdAt: log.created_at,
@@ -78,7 +81,7 @@ function toLogRow(log: NewApiUsageLog, locale: Locale): LogRow {
         requestId: log.request_id,
         useTimeMs: log.use_time * 1000, // new-api use_time 是【秒】
         promptTokens: log.prompt_tokens,
-        completionTokens: log.completion_tokens,
+        completionTokens: task.tokens > 0 ? task.tokens : log.completion_tokens, // 视频 token 全在输出侧
         cacheReadTokens: cache.read,
         cacheWriteTokens: cache.write,
         perImageBilled: isPerImageBilled(log.other, log.model_name), // 按张计费才藏 token
@@ -122,11 +125,14 @@ export async function GET(req: NextRequest) {
         return NextResponse.json({ rows: [], page: q.page, hasMore: false, error: 'fetch_failed' });
     }
 
-    // IDOR 二次过滤 + 只留 API 调用(成功 2 / 失败 5)
+    // IDOR 二次过滤 + 只留 API 调用(成功 2 / 失败 5);type=6 只用来把任务插件的退差额结算行并进预扣行
     const mine = items.filter((l) => l.user_id === newapiUserId && (l.type === 2 || l.type === 5));
-    const consume = mine.filter((l) => l.type === 2);
+    const refunds = items.filter((l) => l.user_id === newapiUserId && l.type === 6);
+    const rawConsume = mine.filter((l) => l.type === 2);
     const errors = mine.filter((l) => l.type === 5);
-    const visibleErrors = collapseRetriedFailures(consume, errors);
+    const visibleErrors = collapseRetriedFailures(rawConsume, errors);
+    // 任务插件「预扣 + 结算」并成一行(金额 = 最终实扣、token = 真实值)
+    const consume = mergeTaskSettlements(rawConsume, refunds);
     // 友好化错误文案跟随站点语言(cookie / Accept-Language;测试 / 无请求上下文 → 中文)。
     const locale = await getLocale();
     const rows: LogRow[] = [...consume, ...visibleErrors]

@@ -21,6 +21,7 @@ import 'server-only';
 import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { fetchUserRefunds, getUsageDashboard } from './client';
+import { getNewapiLogsPool } from './logs-db';
 import { cnyToQuota } from './quota-units';
 
 const TTL_MS = 5 * 60 * 1_000;
@@ -342,6 +343,8 @@ async function fetchLiveAggregate(args: {
     let totalCalls = 0;
     let totalTokens = 0;
     const byModelMap = new Map<string, { calls: number; quota: number }>();
+    // 每模型 token_used 合计:全 0 的模型才可能是任务插件(视频)行,作为补 token 查询的候选集
+    const tokenUsedByModel = new Map<string, number>();
     // date(YYYY-MM-DD, Shanghai) → model → quota, for the stacked-bar chart.
     const dayModelMap = new Map<string, Map<string, number>>();
 
@@ -352,6 +355,7 @@ async function fetchLiveAggregate(args: {
         totalUsedQuota += row.quota;
         totalTokens += row.token_used;
         const key = row.model_name || '<unknown>';
+        tokenUsedByModel.set(key, (tokenUsedByModel.get(key) ?? 0) + row.token_used);
         const slot = byModelMap.get(key) ?? { calls: 0, quota: 0 };
         slot.calls += row.count;
         slot.quota += row.quota;
@@ -385,6 +389,14 @@ async function fetchLiveAggregate(args: {
         );
     }
     if (totalUsedQuota < 0) totalUsedQuota = 0;
+
+    // 任务插件行(seedance 等视频按 token)的 token 不在 /api/data/ 的 token_used 里(列恒 0),
+    // 从日志库按 usage_facts.tokens 补上 —— 否则「统计 Tokens」卡对视频客户显示 0。
+    totalTokens += await fetchTaskPluginTokens({
+        newapiUserId: args.newapiUserId,
+        range,
+        candidateModels: [...byModelMap.keys()].filter((m) => (tokenUsedByModel.get(m) ?? 0) === 0),
+    });
 
     const byModel = Array.from(byModelMap.entries())
         .map(([model, agg]) => ({ model, calls: agg.calls, quota: Math.max(0, agg.quota) }))
@@ -459,5 +471,75 @@ export async function unionSeedanceUsage<T extends UsageAggregate>(
     } catch (e) {
         console.warn('[usage-aggregate] seedance union failed, returning base agg', e);
         return agg;
+    }
+}
+
+/** 补 token 查询的 SQL 超时:dashboard 只是展示,宁可少补也不拖垮页面 / 日志库。 */
+const TASK_TOKENS_STATEMENT_TIMEOUT_MS = 15_000;
+
+/**
+ * 任务插件(new-api rc.44 doubao / hailuo / sora …)行的真实 token 合计 —— 它们的 `prompt_tokens /
+ * completion_tokens` 列恒 0,`/api/data/` 的 token_used 也就是 0;真实值在 `other.usage_facts.tokens`
+ * (视频按 token 计费;按秒计费的行没有 tokens,自然不计)。
+ *
+ * 口径(与 log-display.mergeTaskSettlements 一致):每个 task_id 只算一次 —— 有结算行(actual_quota,
+ * type=2 补扣或 type=6 退差额)取结算行的真实 tokens,否则取预扣行的估算;失败任务(type=6 全额退款行,
+ * 无 actual_quota)整个不计(没出片、钱也退了)。
+ *
+ * 只读日志库直连(`NEWAPI_LOGS_DATABASE_URL`,同 CSV 导出主路径);未配置(本地 dev)→ 0。
+ * `candidateModels` = 本窗口 token_used 全 0 的模型 —— 纯 LLM 客户为空直接跳过,不打库;视频客户按
+ * `model_name = ANY(...)` 走 idx_logs_model_name,扫描量 = 该客户视频行数而不是全部日志。
+ * 任何失败 → 0 + warn,不影响其它汇总数。
+ */
+async function fetchTaskPluginTokens(args: {
+    newapiUserId: number;
+    range: { start: number; end: number };
+    candidateModels: string[];
+}): Promise<number> {
+    if (args.candidateModels.length === 0) return 0;
+    const pool = getNewapiLogsPool();
+    if (!pool) return 0;
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        await client.query(`SET LOCAL statement_timeout = ${TASK_TOKENS_STATEMENT_TIMEOUT_MS}`);
+        const { rows } = await client.query<{ tokens: string | number | null }>(
+            `WITH t AS (
+                SELECT type,
+                       other::jsonb ->> 'task_id'                      AS task_id,
+                       (other::jsonb #>> '{usage_facts,tokens}')::bigint AS tokens,
+                       (other::jsonb ? 'actual_quota')                 AS settled
+                  FROM logs
+                 WHERE user_id = $1
+                   AND type IN (2, 6)
+                   AND ($2::bigint IS NULL OR created_at >= $2)
+                   AND created_at <= $3
+                   AND model_name = ANY($4::text[])
+                   AND other LIKE '%"is_task":true%'
+                   AND other LIKE '%"tokens":%'
+             ),
+             failed AS (SELECT task_id FROM t WHERE type = 6 AND NOT settled),
+             per_task AS (
+                SELECT DISTINCT ON (task_id) task_id, tokens
+                  FROM t
+                 WHERE task_id IS NOT NULL AND tokens IS NOT NULL
+                   AND task_id NOT IN (SELECT task_id FROM failed WHERE task_id IS NOT NULL)
+                 ORDER BY task_id, settled DESC
+             )
+             SELECT COALESCE(SUM(tokens), 0)::bigint AS tokens FROM per_task`,
+            [args.newapiUserId, args.range.start > 0 ? args.range.start : null, args.range.end, args.candidateModels],
+        );
+        await client.query('COMMIT');
+        const n = Number(rows[0]?.tokens ?? 0);
+        return Number.isFinite(n) && n > 0 ? n : 0;
+    } catch (err) {
+        await client.query('ROLLBACK').catch(() => undefined);
+        console.warn(
+            `[usage-aggregate] 任务插件 token 补查失败 user=${args.newapiUserId},统计 Tokens 不含视频 token:`,
+            err,
+        );
+        return 0;
+    } finally {
+        client.release();
     }
 }
