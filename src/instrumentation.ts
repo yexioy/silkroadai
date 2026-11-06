@@ -84,6 +84,10 @@ export async function register() {
     const { startRatioReconcileScheduler } = await import('@/lib/scheduler/ratio-reconcile');
     startRatioReconcileScheduler();
 
+    // 2026-11-06:分组倍率三键对账(后台 UI 新建分组只写 GroupRatio → 新组不生效),每小时。
+    const { startGroupRatioReconcileScheduler } = await import('@/lib/scheduler/group-ratio-reconcile');
+    startGroupRatioReconcileScheduler();
+
     // OpenAI Batch API 兼容 worker:领 /v1/batches 批任务,逐行 self-fetch 重放
     // /v1/images/* 同步管线(计费在那条腿,worker 零计费逻辑)。5s cadence + 重入守卫。
     const { startBatchScheduler } = await import('@/lib/batch/worker');
