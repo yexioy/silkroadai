@@ -60,6 +60,7 @@ const REQUIRES_GUARD = [
     'effective-group-ratios.ts', // 2026-10-23 专属倍率读路径:act-as 读 /api/user/self/groups
 
     'customer-ratio.ts', // 2026-10-25 专属倍率写路径:矩阵两键同写 + PUT 用户分组
+    'group-ratio-reconcile.ts', // 2026-11-06 分组倍率三键对账:读写 option
 ];
 
 /**
