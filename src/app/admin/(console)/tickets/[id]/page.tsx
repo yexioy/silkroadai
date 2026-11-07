@@ -259,7 +259,7 @@ function TicketDetail() {
                         <div className={card}>
                             <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
                                 <span className={`rounded px-2 py-0.5 ${STATUS_PILL[t.status]}`}>
-                                    {tm.status[t.status]}
+                                    {m.tabs[t.status]}
                                 </span>
                                 <span className={PRIORITY_PILL[t.priority]}>{m.priority[t.priority]}</span>
                                 <span className={muted}>{tm.category[t.category]}</span>

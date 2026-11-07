@@ -234,7 +234,7 @@ function TicketsQueue() {
                                     <td className="px-3 py-2 text-xs whitespace-nowrap">{tm.category[t.category]}</td>
                                     <td className="px-3 py-2 whitespace-nowrap">
                                         <span className={`rounded px-2 py-0.5 text-xs ${STATUS_PILL[t.status]}`}>
-                                            {tm.status[t.status]}
+                                            {m.tabs[t.status]}
                                         </span>
                                     </td>
                                     <td className={`px-3 py-2 text-xs ${PRIORITY_PILL[t.priority]}`}>
