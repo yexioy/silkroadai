@@ -16,9 +16,11 @@ import { buildThread } from './thread';
 export const dynamic = 'force-dynamic';
 
 export async function generateMetadata({ params }: { params: Promise<{ id: string }> }) {
-    const [{ id }, locale] = await Promise.all([params, getLocale()]);
+    const [{ id }, user, locale] = await Promise.all([params, getSessionUser(), getLocale()]);
     const m = pickMessages(ticketsMessages, locale);
-    return { title: m.meta.detailTitle(id.slice(0, 8)) };
+    // 标题用对客编号 T-000123;查不到(非本人 / 非 uuid)退回短 id,页面本体会 404。
+    const ticket = user && UuidSchema.safeParse(id).success ? await getTicketForUser(id, user.id) : null;
+    return { title: m.meta.detailTitle(ticket ? formatTicketNumber(ticket.number) : id.slice(0, 8)) };
 }
 
 export default async function TicketDetailPage({ params }: { params: Promise<{ id: string }> }) {
