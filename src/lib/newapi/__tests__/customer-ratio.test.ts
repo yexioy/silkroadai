@@ -42,7 +42,15 @@ vi.mock('@/lib/db', () => ({
     },
 }));
 
-import { getCustomerRatioState, setCustomerRatios, vipGroupName, MATRIX_KEYS } from '../customer-ratio';
+import {
+    getCustomerRatioState,
+    healMatrixKeys,
+    readMatrixBoth,
+    reconcileCustomerRatios,
+    setCustomerRatios,
+    vipGroupName,
+    MATRIX_KEYS,
+} from '../customer-ratio';
 
 const GLOBAL = { default: 1.3, 'oai image 2': 1.8, 'OAI image 大客户专属': 1.8, 'pool-gpt': 0.4 };
 const PORTAL_USER = {
@@ -291,5 +299,176 @@ describe('setCustomerRatios — 规则 4:进专属分组前钉住分组为空的
         expect(r.tokensPinned).toBe(0);
         expect(mockListTokens).not.toHaveBeenCalled();
         expect(mockUpdateToken).not.toHaveBeenCalled();
+    });
+});
+
+describe('healMatrixKeys — 矩阵两键自愈(2026-10-26 后台「分组倍率」页只写 legacy 键事故)', () => {
+    const LEGACY = MATRIX_KEYS[0];
+    const DOTTED = MATRIX_KEYS[1];
+    const VIP_ROW = { 'oai image 2': 1.7, 'OAI image 大客户专属': 1.7 };
+    const FULL = { 'vip-c-db420d6d': VIP_ROW, awsb蒸馏带f5: { default: 0.9 } };
+
+    /** getOption 按键返回不同值;缺的键返回 null。 */
+    function optionStore(values: Record<string, unknown>) {
+        mockGetOption.mockImplementation(async (key: string) => (key in values ? JSON.stringify(values[key]) : null));
+    }
+    /** 留痕:c-db420d6d 两档 1.7 */
+    function overridesFor(username: string | null, rows: Record<string, number>) {
+        mockUserFindMany.mockResolvedValue([
+            {
+                id: 'u-1',
+                newapi_username: username,
+                ratio_overrides: Object.entries(rows).map(([newapi_group, ratio]) => ({ newapi_group, ratio })),
+            },
+        ]);
+    }
+    let errSpy: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+        errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        overridesFor('c-db420d6d', VIP_ROW);
+    });
+
+    it('readMatrixBoth reads the two keys separately and parses each (missing / bad JSON → {})', async () => {
+        mockGetOption.mockImplementation(async (key: string) =>
+            key === LEGACY ? '{}' : key === DOTTED ? JSON.stringify(FULL) : null,
+        );
+        const both = await readMatrixBoth();
+        expect(mockGetOption.mock.calls.map((c) => c[0]).sort()).toEqual([...MATRIX_KEYS].sort());
+        expect(both.legacy).toEqual({});
+        expect(both.dotted).toEqual(FULL);
+        mockGetOption.mockImplementation(async (key: string) => (key === LEGACY ? 'not json' : null));
+        expect(await readMatrixBoth()).toEqual({ legacy: {}, dotted: {} });
+    });
+
+    it('two keys consistent and matching the overrides → nothing written', async () => {
+        optionStore({ [LEGACY]: FULL, [DOTTED]: FULL });
+        const r = await healMatrixKeys();
+        expect(r.healed).toBe(false);
+        expect(r.reasons).toEqual([]);
+        expect(mockPutOption).not.toHaveBeenCalled();
+        expect(errSpy).not.toHaveBeenCalled();
+    });
+
+    it('legacy `{}` (backend 分组倍率 page save) + dotted full → both keys rewritten to the override matrix', async () => {
+        optionStore({ [LEGACY]: {}, [DOTTED]: FULL });
+        const r = await healMatrixKeys();
+        expect(r.healed).toBe(true);
+        expect(r.reasons).toContain('两键不一致');
+        expect(r.reasons).toContain(`${LEGACY} 缺 vip-c-db420d6d`);
+        expect(mockPutOption).toHaveBeenCalledTimes(2);
+        expect(mockPutOption.mock.calls.map((c) => c[0])).toEqual([...MATRIX_KEYS]);
+        expect(mockPutOption.mock.calls[1][1]).toBe(mockPutOption.mock.calls[0][1]);
+        expect(JSON.parse(mockPutOption.mock.calls[0][1] as string)).toEqual(FULL);
+        expect(errSpy).toHaveBeenCalledWith(
+            '[ratio-reconcile] matrix keys diverged, healed',
+            expect.objectContaining({ reasons: r.reasons, rebuilt: FULL }),
+        );
+    });
+
+    it('both keys missing a vip-* row the overrides have → restored from overrides', async () => {
+        const both = { awsb蒸馏带f5: { default: 0.9 } };
+        optionStore({ [LEGACY]: both, [DOTTED]: both });
+        const r = await healMatrixKeys();
+        expect(r.healed).toBe(true);
+        expect(r.reasons).toEqual([`${LEGACY} 缺 vip-c-db420d6d`, `${DOTTED} 缺 vip-c-db420d6d`]);
+        expect(r.vipRowsFromOverrides).toBe(1);
+        expect(JSON.parse(mockPutOption.mock.calls[0][1] as string)).toEqual(FULL);
+    });
+
+    it('a vip-* row whose numbers disagree with the overrides is corrected', async () => {
+        const stale = { 'vip-c-db420d6d': { 'oai image 2': 1.9, 'OAI image 大客户专属': 1.7 } };
+        optionStore({ [LEGACY]: stale, [DOTTED]: stale });
+        const r = await healMatrixKeys();
+        expect(r.healed).toBe(true);
+        expect(r.reasons).toEqual([`${LEGACY} 的 vip-c-db420d6d 与留痕不符`, `${DOTTED} 的 vip-c-db420d6d 与留痕不符`]);
+        expect(JSON.parse(mockPutOption.mock.calls[0][1] as string)).toEqual({ 'vip-c-db420d6d': VIP_ROW });
+    });
+
+    it('non vip- rows (operator-managed user groups) are kept, taking the non-empty copy; stale vip-* rows without overrides are dropped', async () => {
+        optionStore({
+            [LEGACY]: { awsb蒸馏带f5: {}, az官k: { default: 1.5 }, 'vip-old-gone': { default: 1 } },
+            [DOTTED]: { awsb蒸馏带f5: { default: 0.9 }, vip: { 'oai image 2': 1.7 } },
+        });
+        const r = await healMatrixKeys();
+        expect(r.healed).toBe(true);
+        expect(r.foreignRowsKept).toBe(3);
+        expect(JSON.parse(mockPutOption.mock.calls[0][1] as string)).toEqual({
+            awsb蒸馏带f5: { default: 0.9 }, // legacy 空 → 取 dotted
+            az官k: { default: 1.5 }, // 只在 legacy
+            vip: { 'oai image 2': 1.7 }, // 样例分组 `vip` 不带连字符,不归 portal 管 → 保留
+            'vip-c-db420d6d': VIP_ROW, // 留痕补回
+            // 'vip-old-gone' 留痕没有 → 丢弃
+        });
+    });
+
+    it('never touches user groups or tokens', async () => {
+        optionStore({ [LEGACY]: {}, [DOTTED]: FULL });
+        await healMatrixKeys();
+        expect(mockUpdateUser).not.toHaveBeenCalled();
+        expect(mockUpdateToken).not.toHaveBeenCalled();
+        expect(mockListTokens).not.toHaveBeenCalled();
+    });
+
+    it('a user with overrides but no newapi_username is skipped (cannot name the group), others still healed', async () => {
+        mockUserFindMany.mockResolvedValue([
+            { id: 'u-x', newapi_username: null, ratio_overrides: [{ newapi_group: 'oai image 2', ratio: 1.1 }] },
+            {
+                id: 'u-1',
+                newapi_username: 'c-db420d6d',
+                ratio_overrides: Object.entries(VIP_ROW).map(([newapi_group, ratio]) => ({ newapi_group, ratio })),
+            },
+        ]);
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        optionStore({ [LEGACY]: {}, [DOTTED]: FULL });
+        const r = await healMatrixKeys();
+        expect(r.vipRowsFromOverrides).toBe(1);
+        expect(JSON.parse(mockPutOption.mock.calls[0][1] as string)).toEqual(FULL);
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('u-x'));
+        warn.mockRestore();
+    });
+
+    it('reconcileCustomerRatios heals first, then checks customers against the healed matrix; heal failure becomes a drift entry', async () => {
+        // tick 1:legacy `{}`,heal 后 getCustomerRatioState 读到完整矩阵 → 无漂移
+        const store: Record<string, string> = { [LEGACY]: '{}', [DOTTED]: JSON.stringify(FULL) };
+        mockGetOption.mockImplementation(async (key: string) => store[key] ?? null);
+        mockPutOption.mockImplementation(async (key: string, value: string) => {
+            store[key] = value;
+        });
+        mockUserFindMany
+            .mockResolvedValueOnce([
+                {
+                    id: 'u-1',
+                    newapi_username: 'c-db420d6d',
+                    ratio_overrides: Object.entries(VIP_ROW).map(([newapi_group, ratio]) => ({ newapi_group, ratio })),
+                },
+            ])
+            .mockResolvedValueOnce([{ id: 'u-1' }]);
+        mockUserFindUnique.mockResolvedValue({
+            ...PORTAL_USER,
+            newapi_user_group: 'vip-c-db420d6d',
+            ratio_overrides: Object.entries(VIP_ROW).map(([newapi_group, ratio]) => ({
+                newapi_group,
+                ratio,
+                note: null,
+                updated_at: new Date(),
+            })),
+        });
+        mockGetUser.mockResolvedValue({ ...LIVE_USER, group: 'vip-c-db420d6d' });
+        const r = await reconcileCustomerRatios();
+        expect(r.heal?.healed).toBe(true);
+        expect(r.checked).toBe(1);
+        expect(r.drifts).toEqual([]);
+        expect(JSON.parse(store[LEGACY])).toEqual(FULL);
+
+        // tick 2:自愈读失败 → 一条漂移,客户比对照常进行
+        vi.clearAllMocks();
+        mockGetOption.mockRejectedValueOnce(new Error('new-api 503')).mockResolvedValue(JSON.stringify(FULL));
+        mockUserFindMany.mockResolvedValue([{ id: 'u-1' }]);
+        mockGetGroupRatios.mockResolvedValue({ ...GLOBAL });
+        mockGroupFindMany.mockResolvedValue([]);
+        const r2 = await reconcileCustomerRatios();
+        expect(r2.heal).toBeNull();
+        expect(r2.drifts.map((d) => d.detail.join())).toEqual([expect.stringContaining('矩阵两键自愈失败')]);
+        expect(r2.checked).toBe(1);
     });
 });
