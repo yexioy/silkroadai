@@ -59,6 +59,10 @@ x-portal-api-common: &portal-api-common
     # 排空期响应加 `Connection: close`,Caddy 不再复用长连接把新请求送进正在退出的副本。
     # ⚠️ StopTimeout 在容器创建时写死 —— 旧容器仍是 10s,deploy 脚本用 `docker stop -t` 显式覆盖。
     stop_grace_period: 630s
+    # 2026-11-11:每副本 CPU 硬上限(默认 2.2 核,10 副本合计 22 核 / 32 核机)。事故:副本被大图 GC 打满
+    # 整机 CPU 88% → 同机 new-api 抢不到 CPU,持锁事务变慢 → 大客户单行 UPDATE users 锁队列爆 → 504。
+    # 给 new-api + new-api-db + Caddy 留 ~10 核。平时单副本高峰 0.7–1 核,有 2 倍余量。按机器可在 .env 调。
+    cpus: ${PORTAL_API_CPUS:-2.2}
 
 # ── seedance 企业门户数据面(2026-08-07,大客户上量前扩容)──
 # 单实例 → 3 副本(least_conn,Caddy 在 207.57.166.33 分流 3003/3004/3005),
