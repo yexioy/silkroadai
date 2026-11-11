@@ -32,6 +32,10 @@ import { invalidateEffectiveRatioCache } from './effective-group-ratios';
  *     「无可用渠道」。线上 557 把启用中的 key 分组为空(521 个用户)。所以改分组之前先把它们
  *     钉成当前实际生效的分组(通常 `default`),行为不变,再动用户分组。
  *
+ * 自愈(2026-10-26 事故后加):new-api 后台「分组倍率」页保存**只写 legacy 键** `GroupGroupRatio`,
+ * 把它写成 `{}` 而 dotted 键仍是完整矩阵 → SyncOptions 重灌时 `{}` 后加载胜出,专属客户按全局倍率计费
+ * 约 10 分钟。`healMatrixKeys()` 在每次对账 tick 开头比对两键,不一致就以留痕表为真值重建并两键同写。
+ *
  * 可见性(operator 2026-10-26 问):`vip-<username>` 从不写进 `UserUsableGroups` / `GroupRatio`,
  * 其它用户看不到它(new-api `GetUserUsableGroups` 只会把**自己的**用户分组自动补进自己的可用列表,
  * 描述 "User group");客户本人在 `/api/pricing.usable_group` 里会看到自己这一项,广场代理把它滤掉。
@@ -110,7 +114,42 @@ function parseMatrix(raw: string | null): RatioMatrix {
 }
 
 export async function readMatrix(): Promise<RatioMatrix> {
-    return parseMatrix(await getOption('GroupGroupRatio'));
+    return parseMatrix(await getOption(MATRIX_KEYS[0]));
+}
+
+export interface MatrixBoth {
+    /** `GroupGroupRatio`(new-api 后台「分组倍率」页只写这一个)。 */
+    legacy: RatioMatrix;
+    /** `group_ratio_setting.group_group_ratio`。 */
+    dotted: RatioMatrix;
+}
+
+/** 分别读两个存储键,各自解析(缺键 / 坏 JSON → `{}`)。 */
+export async function readMatrixBoth(): Promise<MatrixBoth> {
+    const [legacyRaw, dottedRaw] = await Promise.all([getOption(MATRIX_KEYS[0]), getOption(MATRIX_KEYS[1])]);
+    return { legacy: parseMatrix(legacyRaw), dotted: parseMatrix(dottedRaw) };
+}
+
+function rowEquals(a: Record<string, number> | undefined, b: Record<string, number> | undefined): boolean {
+    const ka = Object.keys(a ?? {});
+    const kb = Object.keys(b ?? {});
+    if (ka.length !== kb.length) return false;
+    for (const k of ka) {
+        const va = a?.[k];
+        const vb = b?.[k];
+        if (vb === undefined || va === undefined || Math.abs(va - vb) > 1e-9) return false;
+    }
+    return true;
+}
+
+export function matrixEquals(a: RatioMatrix, b: RatioMatrix): boolean {
+    const ka = Object.keys(a);
+    const kb = Object.keys(b);
+    if (ka.length !== kb.length) return false;
+    for (const k of ka) {
+        if (!(k in b) || !rowEquals(a[k], b[k])) return false;
+    }
+    return true;
 }
 
 /** 两键同写同值(规则 1)。 */
@@ -409,14 +448,118 @@ export interface RatioDrift {
     detail: string[];
 }
 
-/** 对账:所有有留痕(或管理过)的客户,比对矩阵与用户分组。 */
-export async function reconcileCustomerRatios(): Promise<{ checked: number; drifts: RatioDrift[] }> {
+const VIP_PREFIX = 'vip-';
+
+export interface HealMatrixResult {
+    healed: boolean;
+    /** 触发原因(空 = 两键一致且与留痕相符,未写)。 */
+    reasons: string[];
+    /** 重建后写入两键的矩阵(未写时为 null)。 */
+    rebuilt: RatioMatrix | null;
+    /** 本次从留痕补回 / 修正的 vip-* 行数。 */
+    vipRowsFromOverrides: number;
+    /** 两键里非 portal 管理(不以 vip- 开头)而被保留的行数。 */
+    foreignRowsKept: number;
+}
+
+/** 留痕表 → 期望的 vip-* 行(`vip-<newapi_username>` → `{令牌分组: 倍率}`)。 */
+async function expectedVipRowsFromOverrides(): Promise<RatioMatrix> {
+    const users = await prisma.user.findMany({
+        where: { ratio_overrides: { some: {} } },
+        select: { id: true, newapi_username: true, ratio_overrides: { select: { newapi_group: true, ratio: true } } },
+        take: 1000,
+    });
+    const out: RatioMatrix = {};
+    for (const u of users) {
+        if (!u.newapi_username) {
+            console.warn(`[ratio-reconcile] user ${u.id} has overrides but no newapi_username; skipped`);
+            continue;
+        }
+        const row: Record<string, number> = {};
+        for (const o of u.ratio_overrides) row[o.newapi_group] = Number(o.ratio);
+        out[vipGroupName(u.newapi_username)] = row;
+    }
+    return out;
+}
+
+/**
+ * 矩阵两键自愈(2026-10-26 事故):两键不一致、或任一键缺 / 错了留痕里有的 vip-* 行,
+ * 就以留痕表为真值重建后两键同写。
+ *  - vip-* 行只来自留痕(留痕没有的 vip-* 行视为过期,丢弃);
+ *  - 非 vip- 行不归 portal 管(operator 手工的用户分组),取两键里非空那份(legacy 优先:后台页只写它,
+ *    它更可能是 operator 最新意图);
+ *  - 自愈范围**只限矩阵两键**,不动用户分组、不动 token —— 那两样仍只在对账里报漂移。
+ * 任何读写失败直接抛,由调用方决定是否继续对账。
+ */
+export async function healMatrixKeys(): Promise<HealMatrixResult> {
+    const [{ legacy, dotted }, expected] = await Promise.all([readMatrixBoth(), expectedVipRowsFromOverrides()]);
+    const reasons: string[] = [];
+    if (!matrixEquals(legacy, dotted)) reasons.push('两键不一致');
+    for (const [vip, row] of Object.entries(expected)) {
+        for (const [name, m] of [
+            [MATRIX_KEYS[0], legacy],
+            [MATRIX_KEYS[1], dotted],
+        ] as const) {
+            if (!(vip in m)) reasons.push(`${name} 缺 ${vip}`);
+            else if (!rowEquals(m[vip], row)) reasons.push(`${name} 的 ${vip} 与留痕不符`);
+        }
+    }
+    if (reasons.length === 0) {
+        return { healed: false, reasons, rebuilt: null, vipRowsFromOverrides: 0, foreignRowsKept: 0 };
+    }
+
+    const rebuilt: RatioMatrix = {};
+    let foreignRowsKept = 0;
+    const foreignKeys = new Set<string>();
+    for (const k of [...Object.keys(legacy), ...Object.keys(dotted)]) if (!k.startsWith(VIP_PREFIX)) foreignKeys.add(k);
+    for (const k of foreignKeys) {
+        const fromLegacy = legacy[k] ?? {};
+        const fromDotted = dotted[k] ?? {};
+        rebuilt[k] = Object.keys(fromLegacy).length > 0 ? { ...fromLegacy } : { ...fromDotted };
+        foreignRowsKept++;
+    }
+    for (const [vip, row] of Object.entries(expected)) rebuilt[vip] = { ...row };
+
+    await writeMatrix(rebuilt);
+    const result: HealMatrixResult = {
+        healed: true,
+        reasons,
+        rebuilt,
+        vipRowsFromOverrides: Object.keys(expected).length,
+        foreignRowsKept,
+    };
+    // console.error 让 Sentry console 集成捕获;scheduler 另发 captureMessage
+    console.error('[ratio-reconcile] matrix keys diverged, healed', {
+        reasons,
+        legacyBefore: legacy,
+        dottedBefore: dotted,
+        rebuilt,
+        vipRowsFromOverrides: result.vipRowsFromOverrides,
+        foreignRowsKept,
+    });
+    return result;
+}
+
+/**
+ * 对账:先自愈矩阵两键(失败不阻断,记一条漂移),再逐个有留痕(或管理过)的客户比对矩阵与用户分组。
+ */
+export async function reconcileCustomerRatios(): Promise<{
+    checked: number;
+    drifts: RatioDrift[];
+    heal: HealMatrixResult | null;
+}> {
+    let heal: HealMatrixResult | null = null;
+    const drifts: RatioDrift[] = [];
+    try {
+        heal = await healMatrixKeys();
+    } catch (err) {
+        drifts.push({ userId: '-', newapiUsername: null, detail: [`矩阵两键自愈失败: ${String(err)}`] });
+    }
     const users = await prisma.user.findMany({
         where: { OR: [{ ratio_overrides: { some: {} } }, { newapi_user_group: { not: null } }] },
         select: { id: true },
         take: 500,
     });
-    const drifts: RatioDrift[] = [];
     for (const u of users) {
         try {
             const st = await getCustomerRatioState(u.id);
@@ -425,5 +568,5 @@ export async function reconcileCustomerRatios(): Promise<{ checked: number; drif
             drifts.push({ userId: u.id, newapiUsername: null, detail: [`对账读取失败: ${String(err)}`] });
         }
     }
-    return { checked: users.length, drifts };
+    return { checked: users.length, drifts, heal };
 }
