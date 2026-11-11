@@ -13,7 +13,6 @@ import { headers } from 'next/headers';
 import { NextRequest } from 'next/server';
 import { getCurrentUser } from '@/lib/auth/session';
 import { prisma } from '@/lib/db';
-import { getTokenUsageWithCache } from '@/lib/newapi/token-usage';
 import { expiredTimeToIso, getTokenMetaForCustomer } from '@/lib/newapi/token-meta';
 import { quotaToCny } from '@/lib/newapi/quota-units';
 import { formatTokenForDisplay } from '@/lib/newapi/token-format';
@@ -63,47 +62,27 @@ export default async function KeysPage() {
             newapi_token_id: true,
             tier: true,
             created_at: true,
-            // 2026-08-15:把 60s 行缓存的两列一并捞出来传给 getTokenUsageWithCache,
-            // 省掉它内部对【刚查过的同一行】再做一次 findUnique(N 个 key = N 次多余往返)。
-            cached_used_quota: true,
-            cached_used_at: true,
         },
     });
 
-    // W6 D4: parallel per-token usage fetch,每 token 走各自的 60s 行缓存
-    // (⚠️ 不是批量合并的,冷缓存时是 N 发上游,见 token-usage.ts 头注释)。
-    // 单个 token 失败只影响该行快照(记 warn + 该行不显示用量)。
-    // 2026-08-15:档次/倍率两项本来串在这段之后白等一个 RTT,一并并到这里。
-    // 2026-10-22:额度上限 / 到期时间只从 new-api 读(单一事实源,不落库),失败降级为"暂不可用"。
+    // 每 key 的「累计用量 · 最近调用」直接取 new-api token 行自带的 used_quota /
+    // accessed_time(与额度/到期同一次 act-as 列表调用,零额外上游请求)。
+    // 2026-11-11 之前这里是每 key 一发 `GET /api/log/?user_id=&token_id=`:new-api
+    // 两个参数都忽略 → 在 2.8 亿行 logs 上全表 `count(*)`,单次 3–37s,高峰十几个
+    // 并发,是当天 new-api 卡顿的加重因素之一;且 page_size 被钳 100、取回的是全平台
+    // 最新 100 行,post-filter 后数字基本是 0,本来就不准。
     const customerAuth =
         user.newapi_user_id != null && user.newapi_access_token
             ? { accessToken: user.newapi_access_token, userId: user.newapi_user_id }
             : null;
-    const [usageSnaps, tierGroupsRaw, effective, meta] = await Promise.all([
-        Promise.all(
-            tokens.map(async (t) => {
-                if (user.newapi_user_id == null) return null;
-                try {
-                    return await getTokenUsageWithCache({
-                        prismaTokenId: t.id,
-                        newapiUserId: user.newapi_user_id,
-                        newapiTokenId: t.newapi_token_id,
-                        cachedRow: { cached_used_quota: t.cached_used_quota, cached_used_at: t.cached_used_at },
-                    });
-                } catch (err) {
-                    console.warn(`[keys] usage fetch failed for token ${t.id}:`, err);
-                    return null;
-                }
-            }),
-        ),
+    const [tierGroupsRaw, effective, meta] = await Promise.all([
         listEnabledChannelGroups(user.tenant_id),
         // 2026-10-23:倍率以客户身份读(GroupGroupRatio 专属覆盖生效),失败回落全局
         getEffectiveGroupRatios(user),
         customerAuth ? getTokenMetaForCustomer(customerAuth) : Promise.resolve(null),
     ]);
 
-    const rows: KeyRow[] = tokens.map((t, i) => {
-        const snap = usageSnaps[i];
+    const rows: KeyRow[] = tokens.map((t) => {
         const m = meta?.get(t.newapi_token_id) ?? null;
         return {
             id: t.id,
@@ -119,10 +98,10 @@ export default async function KeysPage() {
             // 10^15 quota a year is well within Number.MAX_SAFE_INTEGER.
             // Pass null for failed lookups so UI can hide the row's
             // usage line gracefully.
-            used_quota: snap ? Number(snap.used_quota) : null,
+            used_quota: m ? m.used_quota : null,
             // ¥ computed server-side; keys-list is a client island (server-only FX env).
-            usedCny: snap ? quotaToCny(Number(snap.used_quota)) : null,
-            last_used_at: snap?.last_used_at ? snap.last_used_at.toISOString() : null,
+            usedCny: m ? quotaToCny(m.used_quota) : null,
+            last_used_at: m && m.accessed_time > 0 ? new Date(m.accessed_time * 1000).toISOString() : null,
             tier: t.tier,
             meta_available: m != null,
             quota_unlimited: m ? m.unlimited_quota : null,

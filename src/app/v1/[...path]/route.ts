@@ -3263,7 +3263,7 @@ async function handleKeySelfInspect(req: NextRequest): Promise<NextResponse> {
             model_limits_enabled: true,
             model_limits: true,
             newapi_token_id: true,
-            user: { select: { newapi_user_id: true, tenant_id: true } },
+            user: { select: { newapi_user_id: true, newapi_access_token: true, tenant_id: true } },
         },
     });
     if (!token || token.status !== 'active') return billingError('Invalid token', 401);
@@ -3291,8 +3291,9 @@ async function handleKeySelfInspect(req: NextRequest): Promise<NextResponse> {
     }
 
     // 本 key 用量(60s 行缓存,best-effort):
-    // - recent_used_cny 是【近 1000 条消费日志的毛和】(token-usage.ts 的 at-a-glance
-    //   近似,不含退款、超窗即截断)—— 命名带 recent,不冒充对账口径的累计消费;
+    // - recent_used_cny:字段名沿用(对外契约不改),2026-11-11 起取值是 new-api token
+    //   行的【累计毛消费】used_quota(不含退款扣减,非对账口径);此前的「近 1000 条日志
+    //   求和」实际在全表 count 且结果基本为 0,已废弃(见 token-usage.ts 头注释);
     // - last_used_at 只在 source==='live' 时给(缓存命中时 helper 返回的是缓存写入
     //   时间,不是真实最后使用时间 —— 机读端点不能给撒谎数据):字段省略 = 本次未知,
     //   null = 确认从未使用。
@@ -3302,6 +3303,7 @@ async function handleKeySelfInspect(req: NextRequest): Promise<NextResponse> {
             const snap = await getTokenUsageWithCache({
                 prismaTokenId: token.id,
                 newapiUserId: token.user.newapi_user_id,
+                newapiAccessToken: token.user.newapi_access_token,
                 newapiTokenId: token.newapi_token_id,
             });
             keyUsage = {
