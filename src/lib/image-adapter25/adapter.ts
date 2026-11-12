@@ -37,9 +37,12 @@ import { resolveOutputBackground } from '@/lib/image/opacity';
 import { alignTo16, isAutoSize, officialAutoDims } from '@/lib/image-adapter/auto-size';
 import {
     GIF_DEFAULT_DIMS,
+    gifDeliveryProblem,
     gifDimensions,
     gifFrameCount,
+    gifFrameCountOf,
     gifSheetDims,
+    gifSheetError,
     gifUpstreamDims,
     gpt26ParamError,
     GPT_IMAGE_26_EXTRAS,
@@ -1008,7 +1011,7 @@ export async function handleAdapter25Image(
     const isGpt26 = (GPT_IMAGE_26_MODELS as ReadonlyArray<string>).includes(parsed.model);
     parsed = { ...parsed, extras: pruneGpt26Extras(parsed.extras, isGpt26) };
     if (isGpt26) {
-        const paramErr = gpt26ParamError(parsed.extras, parsed.mask !== null, mode === 'edits');
+        const paramErr = gpt26ParamError(parsed.extras, parsed.mask !== null, mode === 'edits', provider.gif);
         if (paramErr) {
             console.warn('[image-adapter25] 2.6 param rejected', { provider: providerName, ...paramErr });
             return terminalReject({ terminal: 'bad_request', ...paramErr });
@@ -1043,9 +1046,19 @@ export async function handleAdapter25Image(
     const gifFrames = gifTarget ? gifFrameCount(parsed.extras) : null;
     let gifRetime: GifRetime | null = null;
     if (gifTarget) {
+        // 上游不校验拼图的(monkeycoding26 什么尺寸都收、交小图)→ 按官方规则先拦,不让客户为放大图付大尺寸的钱
+        const sheetErr = provider.gif?.checkSheet ? gifSheetError(gifTarget, gifFrames ?? 0) : null;
+        if (sheetErr) {
+            console.warn('[image-adapter25] gif sheet rejected', {
+                provider: providerName,
+                size: parsed.size,
+                gifFrames,
+            });
+            return terminalReject({ terminal: 'bad_request', ...sheetErr });
+        }
         const up = gifUpstreamDims(gifTarget);
         parsed = { ...parsed, size: `${up.w}x${up.h}` };
-        if (mode === 'edits') {
+        if (mode === 'edits' && !provider.gif?.nativeEditsFrames) {
             const taken = takeEditsGifFrameParams(parsed.extras);
             parsed = { ...parsed, extras: taken.upstreamExtras };
             gifRetime = taken.retime;
@@ -1086,12 +1099,24 @@ export async function handleAdapter25Image(
     // 串行补齐 2 轮 → 封顶 3 张(客户「n 最多 3」)。现在对它们并发发 count 次 n=1 的单图请求凑数:
     // 耗时 = 最慢一次而不是 count 次之和,也不再吃补齐轮数上限。补齐轮同样走这条路。
     const strategy: 'native' | 'fanout' = provider.nativeN ? 'native' : 'fanout';
+    // GIF 交付校验(providers.ts gif.verifyRetries):上游偶发把 GIF 交成 PNG / 帧数给少 → 原地重打,仍不过当作没拿到图
+    const gifVerifyRetries = gifTarget ? (provider.gif?.verifyRetries ?? 0) : 0;
+    const gifExpect = { minFrames: gifRetime ? null : gifFrames, transparent: wantsTransparent };
+    const callOnce = async (count: number): Promise<string[] | TerminalReject | null> => {
+        for (let attempt = 0; ; attempt++) {
+            const r = await callUpstream(provider, providerName, mode, parsed, count, auth);
+            if (!gifVerifyRetries || !Array.isArray(r)) return r;
+            const problems = await Promise.all(r.map((b64) => gifDeliveryProblem(b64, gifExpect)));
+            const good = r.filter((_, i) => problems[i] === null);
+            if (good.length > 0) return good;
+            console.warn('[image-adapter25] gif verify failed', { provider: providerName, mode, attempt, problems });
+            if (attempt >= gifVerifyRetries) return null;
+        }
+    };
     const requestImages = (count: number): Promise<Array<string[] | TerminalReject | null>> =>
         strategy === 'native'
-            ? callUpstream(provider, providerName, mode, parsed, count, auth).then((r) => [r])
-            : Promise.all(
-                  Array.from({ length: count }, () => callUpstream(provider, providerName, mode, parsed, 1, auth)),
-              );
+            ? callOnce(count).then((r) => [r])
+            : Promise.all(Array.from({ length: count }, () => callOnce(1)));
     const collect = (rs: Array<string[] | TerminalReject | null>) =>
         rs
             .flatMap((r) => (Array.isArray(r) ? r : []))
@@ -1177,6 +1202,13 @@ export async function handleAdapter25Image(
 
     if (gifTarget) for (const it of items) it.b64_json = await resizeGifB64(it.b64_json, gifTarget);
     if (gifRetime) for (const it of items) it.b64_json = await retimeGifB64(it.b64_json, gifRetime);
+    // 上游多给了帧(校验只保证不少于请求)→ 均匀抽回请求帧数,帧时长保持请求值
+    else if (gifVerifyRetries && gifFrames) {
+        const durationMs = parsed.extras.frame_duration_ms ? Number(parsed.extras.frame_duration_ms) : null;
+        for (const it of items)
+            if (gifFrameCountOf(Buffer.from(it.b64_json, 'base64')) > gifFrames)
+                it.b64_json = await retimeGifB64(it.b64_json, { frames: gifFrames, durationMs });
+    }
 
     // ---- 计费尺寸 = 回显 size:优先【返回图实际像素】(防上游静默降级超收;auto 由模型选尺寸,只能按实际);
     //      读不出 → 显式 size 按请求值 / auto 无从计费 → 让路 ----

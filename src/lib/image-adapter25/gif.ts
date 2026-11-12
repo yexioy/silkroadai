@@ -31,6 +31,27 @@ const GIF_DEFAULT_FRAME_DURATION_MS = 200;
 /** 改图出 GIF 本地抽帧的上限 = 上游默认帧数。 */
 export const EDITS_GIF_MAX_FRAME_COUNT = GIF_DEFAULT_FRAME_COUNT;
 
+/** 官方单次请求的像素预算与最长边(= 3840×2160);GIF 按整张拼图算。 */
+const GIF_SHEET_MAX_PIXELS = 3840 * 2160;
+const GIF_SHEET_MAX_EDGE = 3840;
+/** 透明 GIF 校验:首帧透明像素占比低于此值视为没给透明。 */
+const GIF_TRANSPARENT_MIN_RATIO = 0.005;
+/** 交付帧与目标宽高比相差超过此值 → 居中裁切而不是拉伸。 */
+const GIF_ASPECT_TOLERANCE = 0.02;
+
+/** 上游的 GIF 能力差异(providers.ts `gif`)。缺省 = we-token / ztyunjuan 的行为:上游自己校验拼图、
+ *  出不了透明 GIF、改图带帧参数出不了图。 */
+export interface GifProviderCaps {
+    /** 上游不校验拼图预算(什么尺寸都收,交一张小图)→ 适配器按官方规则先拦。 */
+    checkSheet?: boolean;
+    /** 上游真能出透明 GIF(交付前逐张验透明像素)。 */
+    transparent?: boolean;
+    /** 改图端点原生支持 frame_count / frame_duration_ms,不用本地抽帧。 */
+    nativeEditsFrames?: boolean;
+    /** 上游偶发把 GIF 请求交成 PNG、帧数给少:校验不过时原地重打的次数,仍不过 → 让路。 */
+    verifyRetries?: number;
+}
+
 export interface Gpt26ParamError {
     detail: string;
     param: string;
@@ -76,6 +97,7 @@ export function gpt26ParamError(
     extras: Record<string, string>,
     hasMask: boolean,
     isEdits = false,
+    caps: GifProviderCaps = {},
 ): Gpt26ParamError | null {
     const format = requestedOutputFormat(extras);
     if (format === 'svg')
@@ -102,7 +124,7 @@ export function gpt26ParamError(
                 param: 'frame_count',
                 code: 'invalid_value',
             };
-        if (isEdits && v > EDITS_GIF_MAX_FRAME_COUNT)
+        if (isEdits && !caps.nativeEditsFrames && v > EDITS_GIF_MAX_FRAME_COUNT)
             return {
                 detail: `Invalid 'frame_count' for GIF output from image edits. Received ${v}. Use an integer from ${MIN_FRAME_COUNT} to ${EDITS_GIF_MAX_FRAME_COUNT}, or omit 'frame_count' to use ${GIF_DEFAULT_FRAME_COUNT}.`,
                 param: 'frame_count',
@@ -126,7 +148,7 @@ export function gpt26ParamError(
             param: 'output_compression',
             code: 'invalid_value',
         };
-    if ((extras.background ?? '').trim().toLowerCase() === 'transparent')
+    if (!caps.transparent && (extras.background ?? '').trim().toLowerCase() === 'transparent')
         return {
             detail: "Transparent background requires output_format 'png' or 'webp'.",
             param: 'background',
@@ -151,6 +173,70 @@ export function gifSheetDims(w: number, h: number, frames: number): { w: number;
     return aspect(wide) <= aspect(tall) ? wide : tall;
 }
 
+/** 官方规则:整张拼图要放得进单次请求的像素预算和最长边,放不进 → 400(2026-11-12 官方 API 源实测:
+ *  1024² 任何帧数、816² 16 帧、1344×768 9 帧被拒;1344×768 2 帧、1280×720 9 帧、1024×576 4 帧通过)。 */
+export function gifSheetError(target: { w: number; h: number }, frames: number): Gpt26ParamError | null {
+    const sheet = gifSheetDims(target.w, target.h, frames);
+    if (Math.max(sheet.w, sheet.h) <= GIF_SHEET_MAX_EDGE && sheet.w * sheet.h <= GIF_SHEET_MAX_PIXELS) return null;
+    return {
+        detail: `No supported sheet fits ${frames} GIF frames at the requested size. Reduce the frame size or frame_count.`,
+        param: 'size',
+        code: 'invalid_value',
+    };
+}
+
+/** GIF 的图像帧数(数 Image Descriptor 块);不是 GIF / 结构读不下去 → 0。 */
+export function gifFrameCountOf(buf: Buffer): number {
+    if (!isGifBytes(buf) || buf.length < 13) return 0;
+    const colorTable = (packed: number) => (packed & 0x80 ? 3 * (2 << (packed & 7)) : 0);
+    const skipSubBlocks = (at: number) => {
+        let q = at;
+        while (q < buf.length && buf[q] !== 0) q += buf[q] + 1;
+        return q + 1;
+    };
+    let p = 13 + colorTable(buf[10]);
+    let frames = 0;
+    while (p < buf.length) {
+        const block = buf[p];
+        if (block === 0x2c) {
+            if (p + 10 > buf.length) break;
+            frames++;
+            p = skipSubBlocks(p + 10 + colorTable(buf[p + 9]) + 1);
+        } else if (block === 0x21) p = skipSubBlocks(p + 2);
+        else break;
+    }
+    return frames;
+}
+
+/** 首帧是否真有透明像素;读不出 → null(存疑放行)。 */
+export async function gifHasTransparency(buf: Buffer): Promise<boolean | null> {
+    const sharp = await loadSharp();
+    if (!sharp) return null;
+    try {
+        const { data } = await sharp(buf, { page: 0 }).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+        let clear = 0;
+        for (let i = 3; i < data.length; i += 4) if (data[i] < 128) clear++;
+        return clear / (data.length / 4) >= GIF_TRANSPARENT_MIN_RATIO;
+    } catch {
+        return null;
+    }
+}
+
+export interface GifExpectation {
+    /** 至少要有的帧数;null = 不查(改图本地抽帧的路径)。 */
+    minFrames: number | null;
+    transparent: boolean;
+}
+
+/** 交付校验:是 GIF、帧数够、要透明的真透明。返回不合格原因,合格 → null。 */
+export async function gifDeliveryProblem(b64: string, expect: GifExpectation): Promise<string | null> {
+    const buf = Buffer.from(b64, 'base64');
+    if (!isGifBytes(buf)) return 'not_gif';
+    if (expect.minFrames !== null && gifFrameCountOf(buf) < expect.minFrames) return 'too_few_frames';
+    if (expect.transparent && (await gifHasTransparency(buf)) === false) return 'not_transparent';
+    return null;
+}
+
 /** 发给上游的尺寸:不低于最低像素的原样;低于的同比放大并对齐 16 倍数(与 ztyunjuan 的放大结果一致)。 */
 export function gifUpstreamDims(target: { w: number; h: number }): { w: number; h: number } {
     if (target.w * target.h >= GPT_IMAGE_MIN_PIXELS) return target;
@@ -164,7 +250,8 @@ export function gifUpstreamDims(target: { w: number; h: number }): { w: number; 
     return { w, h };
 }
 
-/** 动图缩到目标尺寸,保留帧数和帧时长。已是目标尺寸 / 不是 GIF → 原样;失败回退原图(按实际尺寸计费),永不抛。 */
+/** 动图缩到目标尺寸,保留帧数和帧时长。已是目标尺寸 / 不是 GIF → 原样;失败回退原图(按实际尺寸计费),永不抛。
+ *  上游给的宽高比和目标不一致时居中裁切(monkeycoding 请求 1344×768 交 824×944),一致时直接缩放。 */
 export async function resizeGifB64(b64: string, target: { w: number; h: number }): Promise<string> {
     const buf = Buffer.from(b64, 'base64');
     const dims = gifDimensions(buf);
@@ -172,7 +259,11 @@ export async function resizeGifB64(b64: string, target: { w: number; h: number }
     const sharp = await loadSharp();
     if (!sharp) return b64;
     try {
-        const out = await sharp(buf, { animated: true }).resize(target.w, target.h, { fit: 'fill' }).gif().toBuffer();
+        const sameAspect = Math.abs((dims.w * target.h) / (dims.h * target.w) - 1) <= GIF_ASPECT_TOLERANCE;
+        const out = await sharp(buf, { animated: true })
+            .resize(target.w, target.h, { fit: sameAspect ? 'fill' : 'cover' })
+            .gif()
+            .toBuffer();
         return out.toString('base64');
     } catch (e) {
         console.warn('[image-adapter25] gif resize failed', e instanceof Error ? e.message : e);

@@ -7,9 +7,12 @@ import { NextRequest } from 'next/server';
 import sharp from 'sharp';
 import { handleAdapter25Image, imageDimensions, sniffOutputFormat } from '@/lib/image-adapter25/adapter';
 import {
+    gifDeliveryProblem,
     gifDimensions,
     gifFrameCount,
+    gifFrameCountOf,
     gifSheetDims,
+    gifSheetError,
     gifUpstreamDims,
     gpt26ParamError,
     pickFrameIndices,
@@ -381,5 +384,180 @@ describe('适配器 GIF 全流程', () => {
         expect(body.frame_count).toBeUndefined();
         expect(body.complexity).toBeUndefined();
         expect(body.size).toBe('1024x1024');
+    });
+});
+
+describe('monkeycoding26:GIF 毛病由适配器兜', () => {
+    const fetchMock = vi.fn();
+    beforeEach(() => {
+        fetchMock.mockReset();
+        vi.stubGlobal('fetch', fetchMock);
+    });
+    afterEach(() => vi.unstubAllGlobals());
+
+    const P = 'monkeycoding26';
+    const jsonRes = (b64: string) =>
+        new Response(JSON.stringify({ created: 1, data: [{ b64_json: b64 }] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+        });
+    const post = (body: Record<string, unknown>) =>
+        handleAdapter25Image(
+            new NextRequest(`http://portal.test/image-adapter25/${P}/v1/images/generations`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', authorization: 'Bearer sk-upstream-test' },
+                body: JSON.stringify({
+                    model: 'gpt-image-2.6-flare',
+                    prompt: 'x',
+                    output_format: 'gif',
+                    quality: 'low',
+                    ...body,
+                }),
+            }),
+            'generations',
+            P,
+        );
+    const pngB64 = async () =>
+        (
+            await sharp({ create: { width: 816, height: 816, channels: 3, background: '#39c' } })
+                .png()
+                .toBuffer()
+        ).toString('base64');
+
+    // 2026-11-12 官方 API 源实测的通过 / 拒绝边界
+    it.each([
+        [512, 512, 9, true],
+        [816, 816, 9, true],
+        [816, 816, 4, true],
+        [1280, 720, 9, true],
+        [1344, 768, 2, true],
+        [1024, 576, 4, true],
+        [512, 512, 16, true],
+        [816, 816, 16, false],
+        [1024, 1024, 9, false],
+        [1024, 1024, 2, false],
+        [1536, 1024, 4, false],
+        [1344, 768, 9, false],
+        [2048, 2048, 2, false],
+        [3840, 2160, 9, false],
+    ])('gifSheetError %dx%d %d 帧 → 放得进=%s', (w, h, frames, fits) => {
+        expect(gifSheetError({ w, h }, frames) === null).toBe(fits);
+    });
+
+    it('gifFrameCountOf 数帧;非 GIF → 0', async () => {
+        expect(gifFrameCountOf(await animatedGif(64, 9, 200))).toBe(9);
+        expect(gifFrameCountOf(await animatedGif(64, 4, 100))).toBe(4);
+        expect(gifFrameCountOf(Buffer.from(await pngB64(), 'base64'))).toBe(0);
+    });
+
+    it('gifDeliveryProblem:PNG / 帧数少 / 没给透明 都判不合格', async () => {
+        const gif = (await animatedGif(64, 4, 200)).toString('base64');
+        expect(await gifDeliveryProblem(await pngB64(), { minFrames: 4, transparent: false })).toBe('not_gif');
+        expect(await gifDeliveryProblem(gif, { minFrames: 9, transparent: false })).toBe('too_few_frames');
+        expect(await gifDeliveryProblem(gif, { minFrames: 4, transparent: true })).toBe('not_transparent');
+        expect(await gifDeliveryProblem(gif, { minFrames: 4, transparent: false })).toBeNull();
+    });
+
+    it('上游放不进拼图的尺寸不打上游,直接 400', async () => {
+        const res = await post({ size: '1024x1024' });
+        expect(res.status).toBe(400);
+        expect(fetchMock).not.toHaveBeenCalled();
+        expect(JSON.stringify(await res.json())).toMatch(/No supported sheet fits 9 GIF frames/);
+    });
+
+    it('上游交小图(412²)→ 放大到请求的 816²,帧数不变,按请求尺寸的拼图计费', async () => {
+        fetchMock.mockImplementation(async () => jsonRes((await animatedGif(412, 9, 200)).toString('base64')));
+        const res = await post({ size: '816x816' });
+        expect(res.status).toBe(200);
+        const j = await res.json();
+        expect(j.size).toBe('816x816');
+        expect(j.output_format).toBe('gif');
+        expect(await framesOf(j.data[0].b64_json)).toMatchObject({ pages: 9, w: 816, h: 816 });
+        expect(j.usage.output_tokens).toBe(2151); // 官方 816² 9 帧
+    });
+
+    it('宽高比不对的小图居中裁切到请求尺寸', async () => {
+        const tall = await sharp(await animatedGif(96, 2, 200), { animated: true })
+            .resize(82, 94, { fit: 'fill' })
+            .gif()
+            .toBuffer();
+        const out = await resizeGifB64(tall.toString('base64'), { w: 1344, h: 768 });
+        expect(await framesOf(out)).toMatchObject({ pages: 2, w: 1344, h: 768 });
+    });
+
+    it('上游把 GIF 交成 PNG → 原地重打,第二次是 GIF 就交付', async () => {
+        const png = await pngB64();
+        const gif = (await animatedGif(412, 9, 200)).toString('base64');
+        fetchMock.mockImplementationOnce(async () => jsonRes(png)).mockImplementation(async () => jsonRes(gif));
+        const res = await post({ size: '816x816' });
+        expect(res.status).toBe(200);
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect((await res.json()).output_format).toBe('gif');
+    });
+
+    it('三次都交 PNG → 503 让路,不把 PNG 当 GIF 交付', async () => {
+        const png = await pngB64();
+        fetchMock.mockImplementation(async () => jsonRes(png));
+        const res = await post({ size: '816x816' });
+        expect(res.status).toBe(503);
+        expect(fetchMock).toHaveBeenCalledTimes(3);
+    });
+
+    it('上游多给帧 → 抽回请求的 4 帧,帧时长按请求', async () => {
+        fetchMock.mockImplementation(async () => jsonRes((await animatedGif(412, 9, 200)).toString('base64')));
+        const res = await post({ size: '816x816', frame_count: 4, frame_duration_ms: 100 });
+        expect(res.status).toBe(200);
+        const f = await framesOf((await res.json()).data[0].b64_json);
+        expect(f.pages).toBe(4);
+        expect(f.delay).toEqual([100, 100, 100, 100]);
+    });
+
+    it('透明 GIF 放行并发给上游;其它 2.6 线仍 400', async () => {
+        fetchMock.mockImplementation(async () => jsonRes((await animatedGif(412, 4, 200)).toString('base64')));
+        const res = await post({ size: '816x816', frame_count: 4, background: 'transparent' });
+        // 测试用的不透明 GIF 过不了透明校验 → 重打后让路,说明请求确实发给了上游
+        expect(res.status).toBe(503);
+        expect(JSON.parse(fetchMock.mock.calls[0][1].body as string).background).toBe('transparent');
+        expect(gpt26ParamError({ output_format: 'gif', background: 'transparent' }, false)?.param).toBe('background');
+    });
+
+    it('SVG 照常立即 400(代理层据此走两步作者流程)', async () => {
+        const res = await post({ output_format: 'svg' });
+        expect(res.status).toBe(400);
+        expect(fetchMock).not.toHaveBeenCalled();
+        expect(JSON.stringify(await res.json())).toMatch(/Invalid value: 'svg'/);
+    });
+
+    it('改图 GIF:帧参数原样发上游(超过 9 帧也收)', async () => {
+        fetchMock.mockImplementation(async () => jsonRes((await animatedGif(307, 10, 150)).toString('base64')));
+        const form = new FormData();
+        for (const [k, v] of Object.entries({
+            model: 'gpt-image-2.6-flare',
+            prompt: 'x',
+            output_format: 'gif',
+            quality: 'low',
+            size: '512x512',
+            frame_count: '10',
+            frame_duration_ms: '150',
+        }))
+            form.append(k, v);
+        const png = await sharp({ create: { width: 64, height: 64, channels: 3, background: '#c33' } })
+            .png()
+            .toBuffer();
+        form.append('image', new Blob([new Uint8Array(png)], { type: 'image/png' }), 'i.png');
+        const res = await handleAdapter25Image(
+            new NextRequest(`http://portal.test/image-adapter25/${P}/v1/images/edits`, {
+                method: 'POST',
+                headers: { authorization: 'Bearer sk-upstream-test' },
+                body: form,
+            }),
+            'edits',
+            P,
+        );
+        expect(res.status).toBe(200);
+        const sent = fetchMock.mock.calls[0][1].body as FormData;
+        expect(sent.get('frame_count')).toBe('10');
+        expect(sent.get('frame_duration_ms')).toBe('150');
+        expect(await framesOf((await res.json()).data[0].b64_json)).toMatchObject({ pages: 10, w: 512, h: 512 });
     });
 });
