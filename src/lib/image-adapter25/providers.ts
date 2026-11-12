@@ -9,6 +9,8 @@
  * 渠道 models 配 `gpt-image-2.5-flare,gpt-image-2.5-sunburst`(两模型 token 数逐档相同,只差单价)。
  */
 
+import type { GifProviderCaps } from './gif';
+
 export interface ImageProvider25 {
     /** 真实上游 base(不含 /v1),适配器拼 `${baseUrl}/v1/images/{generations|edits}`。 */
     baseUrl: string;
@@ -51,6 +53,8 @@ export interface ImageProvider25 {
     /** 某档位下改走另一个上游模型(按 upstreamQuality 之后的档位查,优先于 modelMap)。用于上游某模型档位是假的:
      *  2.6 flare 各档延迟几乎不变、裁片不随档位变好 → high 改走真分档的 sunburst。入口白名单 / 回显 / 计费仍按客户模型名。 */
     modelMapByQuality?: Partial<Record<'low' | 'medium' | 'high', Readonly<Record<string, string>>>>;
+    /** 2.6 GIF 的上游能力差异(gif.ts GifProviderCaps)。缺省 = 上游自己校验拼图、无透明 GIF、改图帧参数本地处理。 */
+    gif?: GifProviderCaps;
 }
 
 /** 异步任务形上游的传输描述(2026-10-15 为 suduma 引入)。提交与轮询都带 new-api 透传来的 Authorization。 */
@@ -356,5 +360,22 @@ export const IMAGE_PROVIDERS_25: Record<string, ImageProvider25> = {
         baseUrl: 'http://47.251.171.153',
         brand: /\bmonkey\s?-?coding\b|\badobe\b|\bfirefly\b/gi,
         models: GPT_IMAGE_25_MODELS,
+    },
+    // monkeycoding26:同一上游的 gpt-image-2.6 两模型(2026-11-11 / 11-12 两轮实测约 100 发,几乎全 200)。
+    //  - PNG:与 monkeycoding25 同形 —— 零 C2PA、usage 是 2.0 词表(丢弃自算)、五档延迟都在 26–37s(档位不真,
+    //    xhigh / max 上游原样收 → 原样透传、按请求档计费,同 2.5 全量线的取舍)、尺寸如实、n 只回 1 张(扇出);
+    //  - SVG:上游把 svg 请求交成 PNG。适配器照常立即 400(gif.ts gpt26ParamError),代理层收到后走两步作者流程
+    //    (本线出参考图 + svg.model 写 SVG),不需要本线额外处理;
+    //  - GIF 的毛病全在适配器兜(gif 字段):
+    //    · 什么尺寸都收但只交约 1.25MP 拼图切出来的小图(9 帧 ~412²、4 帧 ~620²、16 帧 ~376×242,2 帧 1344×768 交
+    //      824×944)→ 按官方拼图规则先拦放不进的尺寸(checkSheet),放得进的收图后缩放 / 居中裁切到请求尺寸;
+    //    · 偶发把 GIF 请求交成 PNG(11-12:816² 16 帧、816² medium 各一次)→ 校验不过原地重打(verifyRetries);
+    //    · 透明 GIF 上游真出(首帧 67–88% 透明像素)、改图带帧参数也出 → 两项都放开,不走本地抽帧;
+    //    · GIF 11-11 带 ChatGPT 网页池签名、11-12 起零 C2PA,本来缩放也会丢签名。
+    monkeycoding26: {
+        baseUrl: 'http://47.251.171.153',
+        brand: /\bmonkey\s?-?coding\b|\badobe\b|\bfirefly\b/gi,
+        models: GPT_IMAGE_26_MODELS,
+        gif: { checkSheet: true, transparent: true, nativeEditsFrames: true, verifyRetries: 2 },
     },
 };
