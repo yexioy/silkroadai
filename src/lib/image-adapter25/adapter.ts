@@ -36,6 +36,7 @@ import { jsonMaskShapeError, maskDimensionError, multipartMaskShapeError } from 
 import { resolveOutputBackground } from '@/lib/image/opacity';
 import { alignTo16, isAutoSize, officialAutoDims } from '@/lib/image-adapter/auto-size';
 import {
+    EDITS_GIF_MAX_FRAME_COUNT,
     GIF_DEFAULT_DIMS,
     gifDeliveryProblem,
     gifDimensions,
@@ -685,7 +686,13 @@ async function callUpstream(
         return callUpstreamAsyncTask(provider, provider.transport, providerName, mode, parsed, n, auth);
     const url = `${provider.baseUrl}/v1/images/${mode}`;
     const headers: Record<string, string> = { authorization: auth };
-    const q = parsed.quality.trim().toLowerCase();
+    const rawQ = parsed.quality.trim().toLowerCase();
+    // explicitQuality:上游对 auto / 不传报错 → 恒发归一档(与计费档一致);其余上游 auto 原样、不传不发
+    const sendQuality = provider.explicitQuality
+        ? normQuality25(parsed.quality)
+        : FORWARD_QUALITY_SET.has(rawQ)
+          ? rawQ
+          : null;
     let upstreamBody: BodyInit;
     if (mode === 'edits') {
         const f = new FormData();
@@ -693,8 +700,9 @@ async function callUpstream(
         f.append('prompt', parsed.prompt);
         const sendSize = parsed.size.trim(); // auto 原样透传(模型按 prompt 自选画幅),缺省不发
         if (sendSize) f.append('size', sendSize);
-        if (FORWARD_QUALITY_SET.has(q)) f.append('quality', q);
+        if (sendQuality) f.append('quality', sendQuality);
         if (n > 1) f.append('n', String(n));
+        if (provider.upstreamResponseFormat) f.append('response_format', provider.upstreamResponseFormat);
         for (const [k, v] of Object.entries(parsed.extras)) f.append(k, v);
         for (const img of parsed.images)
             f.append('image', new Blob([new Uint8Array(img.buf)], { type: img.type }), img.name);
@@ -708,12 +716,14 @@ async function callUpstream(
         };
         const sendSize = parsed.size.trim(); // auto 原样透传(模型按 prompt 自选画幅),缺省不发
         if (sendSize) j.size = sendSize;
-        if (FORWARD_QUALITY_SET.has(q)) j.quality = q;
+        if (sendQuality) j.quality = sendQuality;
         if (n > 1) j.n = n;
         for (const [k, v] of Object.entries(parsed.extras)) {
             j[k] = INT_EXTRAS.has(k) && /^\d+$/.test(v) ? Number(v) : v;
         }
-        // 不发 response_format:官方 gpt-image 默认返 b64 且拒收该参数(viper3 官 key 实测 400)
+        // 缺省不发 response_format:官方 gpt-image 默认返 b64 且拒收该参数(viper3 官 key 实测 400);
+        // 只有声明了 upstreamResponseFormat 的上游才发(yobox26 默认返 url 且 GIF 的 url 形态恒失败)
+        if (provider.upstreamResponseFormat) j.response_format = provider.upstreamResponseFormat;
         upstreamBody = JSON.stringify(j);
         headers['content-type'] = 'application/json';
     }
@@ -1018,6 +1028,12 @@ export async function handleAdapter25Image(
         }
     }
 
+    // ---- 上游不支持蒙版改图(yobox26 带 mask 恒 503)→ 让路给别的渠道,不打上游 ----
+    if (provider.noMask && parsed.mask) {
+        console.warn('[image-adapter25] mask not served by provider', { provider: providerName });
+        return failover('mask_not_served', `mask edits not served by provider '${providerName}'`);
+    }
+
     // ---- 非法 quality 入口拦截(客户反馈:传 ultra 我们静默按 low 出图 + 计费)----
     // normQuality25 把未知值归一 low 是给 auto/缺省用的;但客户【显式】传了一个非法档位(如 ultra),
     // 应像官方/上游一样明确 400 拒,而不是静默降成 low 出张图还收费。空/缺省不拦(走 auto→low)。
@@ -1056,9 +1072,17 @@ export async function handleAdapter25Image(
             });
             return terminalReject({ terminal: 'bad_request', ...sheetErr });
         }
-        const up = gifUpstreamDims(gifTarget);
+        // 上游忽略帧参数(localFrames)时文生图只拿得到 9 帧:更多帧让路给原生支持的渠道,不拿抽帧冒充
+        if (provider.gif?.localFrames && mode === 'generations' && (gifFrames ?? 0) > EDITS_GIF_MAX_FRAME_COUNT) {
+            console.warn('[image-adapter25] gif frame_count not served by provider', {
+                provider: providerName,
+                gifFrames,
+            });
+            return failover('gif_frames_not_served', `gif frame_count ${gifFrames} not served by '${providerName}'`);
+        }
+        const up = provider.gif?.nativeSmallSizes ? gifTarget : gifUpstreamDims(gifTarget);
         parsed = { ...parsed, size: `${up.w}x${up.h}` };
-        if (mode === 'edits' && !provider.gif?.nativeEditsFrames) {
+        if (provider.gif?.localFrames || (mode === 'edits' && !provider.gif?.nativeEditsFrames)) {
             const taken = takeEditsGifFrameParams(parsed.extras);
             parsed = { ...parsed, extras: taken.upstreamExtras };
             gifRetime = taken.retime;

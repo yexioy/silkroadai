@@ -55,6 +55,14 @@ export interface ImageProvider25 {
     modelMapByQuality?: Partial<Record<'low' | 'medium' | 'high', Readonly<Record<string, string>>>>;
     /** 2.6 GIF 的上游能力差异(gif.ts GifProviderCaps)。缺省 = 上游自己校验拼图、无透明 GIF、改图帧参数本地处理。 */
     gif?: GifProviderCaps;
+    /** true = 恒把【归一后的档位】发给上游(auto / 缺省 → low,与计费档一致)。用于上游对 quality=auto 或不传直接报错
+     *  (yobox26:两种都 503)。缺省 = auto 原样透传、不传就不发。 */
+    explicitQuality?: boolean;
+    /** 发给上游的 `response_format`。缺省不发(官方 gpt-image 拒收该参数)。yobox26 的 url 形态对 GIF 恒失败
+     *  (等 60–115s 后 503 / 429),所以该线一律要 b64。 */
+    upstreamResponseFormat?: 'b64_json';
+    /** true = 上游不支持蒙版改图(带 mask 必失败)→ 带 mask 的请求 503 让路,不打上游。 */
+    noMask?: boolean;
 }
 
 /** 异步任务形上游的传输描述(2026-10-15 为 suduma 引入)。提交与轮询都带 new-api 透传来的 Authorization。 */
@@ -377,5 +385,34 @@ export const IMAGE_PROVIDERS_25: Record<string, ImageProvider25> = {
         brand: /\bmonkey\s?-?coding\b|\badobe\b|\bfirefly\b/gi,
         models: GPT_IMAGE_26_MODELS,
         gif: { checkSheet: true, transparent: true, nativeEditsFrames: true, verifyRetries: 2 },
+    },
+    // yobox26:max.yoboxai.com 的 gpt-image-2.6 两模型(与 yobox25 同一把 key sk-qOd3…,该 key 2026-11-16 起只剩 2.6 两个名)。
+    // 2026-11-16 实测约 110 发(generations + edits + GIF + SVG):
+    //  - 全 OpenAI OpCo 单层签名(PNG / JPEG / GIF 都带,原始编码单 IDAT);flare agent `API/gpt-image-2.6-flare`,
+    //    sunburst `API/gpt-image`;图床 img5.kjlw.uk;
+    //  - 档位:low / medium / high 真兑现(上游 usage ~270 / ~1050 / ~4200,flare 15–27s,sunburst 26–95s);
+    //    xhigh / max 1–3s 内 503 → 适配器发 high(upstreamQuality),回显与计费按请求档(operator 2026-11-16 拍板);
+    //    【quality=auto 和不传也 503】→ explicitQuality 恒发归一档(auto / 缺省 = low);
+    //  - 所有上游错误都包成 503 `one_hub_error: The service is temporarily unavailable`,拿不到明文 → 走通用 failover;
+    //  - 尺寸 1024² / 1536×1024 / 2048² / 3840×2160 如实,auto → 1024×1536(按 prompt 选画幅);1000×1000 → 503(入口校验拦);
+    //    透明真 RGBA(35–40% 透明像素);webp / jpeg 真返;n=2 只返 1 张(扇出);
+    //  - 【只用 b64】generations 默认返 url,GIF 的 url 形态 0/13(60–115s 后 503 / 429 capacity exhausted),b64 正常
+    //    → upstreamResponseFormat 一律 b64_json(operator 2026-11-16「请求只支持 b64」);
+    //  - edits:multipart 单图 / 多图 / 显式尺寸 / 透明通;【mask → 503】→ noMask 让路;
+    //  - GIF(23–56s):816² / 512² / 512×768 如实(小尺寸原生出,不用放大)、透明真透明;frame_count / frame_duration_ms
+    //    两个端点都被忽略(恒 9 帧 200ms)→ 本地抽帧改时长(gif.localFrames;文生图 >9 帧给不出 → 让路);1024² → 503
+    //    (= 官方 No supported sheet fits)→ checkSheet 先拦成 400;
+    //  - SVG:8 发全 503 → 适配器照常 400,由代理层两步作者流程接手。
+    // GIF high 档 1 发 400s 无响应 → 超时收到 300s。单价未核。
+    yobox26: {
+        baseUrl: 'https://max.yoboxai.com',
+        brand: /\byobox\s?ai\b|\byobox\b|\bkjlw\b|\bjd23kjs\b|\bone[_ ]?hub(?:_error)?\b|provider api error:?\s*|\badobe\b|\bfirefly\b/gi,
+        models: GPT_IMAGE_26_MODELS,
+        upstreamQuality: GPT_IMAGE_26_UPSTREAM_QUALITY,
+        explicitQuality: true,
+        upstreamResponseFormat: 'b64_json',
+        noMask: true,
+        upstreamTimeoutMs: 300_000,
+        gif: { checkSheet: true, transparent: true, localFrames: true, nativeSmallSizes: true, verifyRetries: 1 },
     },
 };
