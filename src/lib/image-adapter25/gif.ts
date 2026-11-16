@@ -50,6 +50,11 @@ export interface GifProviderCaps {
     nativeEditsFrames?: boolean;
     /** 上游偶发把 GIF 请求交成 PNG、帧数给少:校验不过时原地重打的次数,仍不过 → 让路。 */
     verifyRetries?: number;
+    /** 上游两个端点都忽略 frame_count / frame_duration_ms(恒 9 帧 200ms,yobox26)→ 文生图也不发帧参数,
+     *  收图后本地抽帧 / 改时长(同改图的做法);文生图超过 9 帧给不出,由适配器让路给别的渠道。 */
+    localFrames?: boolean;
+    /** 上游对低于 gpt-image 最低像素的 GIF 尺寸如实出图(yobox26:512² / 512×768)→ 不放大,原生交付保住签名。 */
+    nativeSmallSizes?: boolean;
 }
 
 export interface Gpt26ParamError {

@@ -561,3 +561,189 @@ describe('monkeycoding26:GIF 毛病由适配器兜', () => {
         expect(await framesOf((await res.json()).data[0].b64_json)).toMatchObject({ pages: 10, w: 512, h: 512 });
     });
 });
+
+describe('yobox26:只用 b64、缺档与忽略的参数由适配器补', () => {
+    const fetchMock = vi.fn();
+    beforeEach(() => {
+        fetchMock.mockReset();
+        vi.stubGlobal('fetch', fetchMock);
+    });
+    afterEach(() => vi.unstubAllGlobals());
+
+    const P = 'yobox26';
+    const jsonRes = (b64: string) =>
+        new Response(JSON.stringify({ created: 1, data: [{ b64_json: b64 }] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+        });
+    const png = async (size = 1024) =>
+        (
+            await sharp({ create: { width: size, height: size, channels: 3, background: '#39c' } })
+                .png()
+                .toBuffer()
+        ).toString('base64');
+    const gen = (body: Record<string, unknown>) =>
+        handleAdapter25Image(
+            new NextRequest(`http://portal.test/image-adapter25/${P}/v1/images/generations`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', authorization: 'Bearer sk-upstream-test' },
+                body: JSON.stringify({ model: 'gpt-image-2.6-flare', prompt: 'x', ...body }),
+            }),
+            'generations',
+            P,
+        );
+    const edit = async (fields: Record<string, string>, withMask = false) => {
+        const f = new FormData();
+        for (const [k, v] of Object.entries({ model: 'gpt-image-2.6-flare', prompt: 'x', ...fields })) f.append(k, v);
+        const input = Buffer.from(await png(), 'base64');
+        f.append('image', new Blob([new Uint8Array(input)], { type: 'image/png' }), 'in.png');
+        if (withMask) f.append('mask', new Blob([new Uint8Array(input)], { type: 'image/png' }), 'mask.png');
+        return handleAdapter25Image(
+            new NextRequest(`http://portal.test/image-adapter25/${P}/v1/images/edits`, {
+                method: 'POST',
+                headers: { authorization: 'Bearer sk-upstream-test' },
+                body: f,
+            }),
+            'edits',
+            P,
+        );
+    };
+    const sentJson = (i = 0) => JSON.parse(String(fetchMock.mock.calls[i][1]?.body)) as Record<string, unknown>;
+    const sentForm = (i = 0) => fetchMock.mock.calls[i][1]?.body as FormData;
+
+    it.each([
+        ['xhigh', 3122],
+        ['max', 7024],
+    ] as const)('%s 发 high 出图,回显与 usage 按请求档;上游只要 b64', async (q, tokens) => {
+        fetchMock.mockImplementation(async () => jsonRes(await png()));
+        const res = await gen({ size: '1024x1024', quality: q });
+        expect(res.status).toBe(200);
+        expect(String(fetchMock.mock.calls[0][0])).toBe('https://max.yoboxai.com/v1/images/generations');
+        expect(sentJson().quality).toBe('high');
+        expect(sentJson().model).toBe('gpt-image-2.6-flare');
+        expect(sentJson().response_format).toBe('b64_json');
+        const j = (await res.json()) as { quality: string; usage: { output_tokens: number } };
+        expect(j.quality).toBe(q);
+        expect(j.usage.output_tokens).toBe(tokens);
+    });
+
+    it.each([[{ quality: 'auto' }], [{}]])('quality=auto / 不传(上游都 503)→ 发 low,按 low 计', async (extra) => {
+        fetchMock.mockImplementation(async () => jsonRes(await png()));
+        const res = await gen({ size: '1024x1024', ...extra });
+        expect(res.status).toBe(200);
+        expect(sentJson().quality).toBe('low');
+        const j = (await res.json()) as { quality: string; usage: { output_tokens: number } };
+        expect(j.quality).toBe('low');
+        expect(j.usage.output_tokens).toBe(824);
+    });
+
+    it('别的上游不受影响:不发 response_format,auto 原样', async () => {
+        fetchMock.mockImplementation(async () => jsonRes(await png()));
+        const res = await handleAdapter25Image(
+            new NextRequest('http://portal.test/image-adapter25/wetokenasia26/v1/images/generations', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', authorization: 'Bearer sk-upstream-test' },
+                body: JSON.stringify({ model: 'gpt-image-2.6-flare', prompt: 'x', size: '1024x1024', quality: 'auto' }),
+            }),
+            'generations',
+            'wetokenasia26',
+        );
+        expect(res.status).toBe(200);
+        expect(sentJson().response_format).toBeUndefined();
+        expect(sentJson().quality).toBe('auto');
+    });
+
+    it('n=2:上游一次只回 1 张 → 扇出两次单图请求', async () => {
+        fetchMock.mockImplementation(async () => jsonRes(await png()));
+        const res = await gen({ size: '1024x1024', quality: 'low', n: 2 });
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect(sentJson().n).toBeUndefined();
+        expect(((await res.json()) as { data: unknown[] }).data).toHaveLength(2);
+    });
+
+    it('改图:multipart 带 b64 与归一档;max 发 high', async () => {
+        fetchMock.mockImplementation(async () => jsonRes(await png()));
+        const res = await edit({ size: '1024x1024', quality: 'max' });
+        expect(res.status).toBe(200);
+        expect(sentForm().get('response_format')).toBe('b64_json');
+        expect(sentForm().get('quality')).toBe('high');
+        expect(((await res.json()) as { quality: string }).quality).toBe('max');
+    });
+
+    it('带 mask 的改图:上游不支持 → 503 让路,不打上游', async () => {
+        const res = await edit({ size: '1024x1024', quality: 'low' }, true);
+        expect(res.status).toBe(503);
+        expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('svg:适配器 400(交给代理层两步流程),不打上游', async () => {
+        const res = await gen({ size: '1024x1024', quality: 'low', output_format: 'svg', svg: { model: 'gpt-5.5' } });
+        expect(res.status).toBe(400);
+        expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('GIF 文生图:帧参数不发上游,收到 9 帧 200ms 后本地抽成 4 帧 100ms,按请求帧数计费', async () => {
+        fetchMock.mockImplementation(async () => jsonRes((await animatedGif(816, 9, 200)).toString('base64')));
+        const res = await gen({
+            size: '816x816',
+            quality: 'low',
+            output_format: 'gif',
+            frame_count: 4,
+            frame_duration_ms: 100,
+        });
+        expect(res.status).toBe(200);
+        expect(sentJson().frame_count).toBeUndefined();
+        expect(sentJson().frame_duration_ms).toBeUndefined();
+        expect(sentJson().response_format).toBe('b64_json');
+        const j = (await res.json()) as { data: Array<{ b64_json: string }>; output_format: string };
+        expect(j.output_format).toBe('gif');
+        const m = await framesOf(j.data[0].b64_json);
+        expect(m).toMatchObject({ pages: 4, w: 816, h: 816 });
+        expect(m.delay).toEqual([100, 100, 100, 100]);
+    });
+
+    it('GIF 文生图 >9 帧:本线给不出 → 503 让路,不打上游', async () => {
+        const res = await gen({ size: '512x512', quality: 'low', output_format: 'gif', frame_count: 12 });
+        expect(res.status).toBe(503);
+        expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('GIF 512²:上游原生出小尺寸 → 原样发 512x512,交付字节不动(保住签名)', async () => {
+        const up = (await animatedGif(512, 9, 200)).toString('base64');
+        fetchMock.mockImplementation(async () => jsonRes(up));
+        const res = await gen({ size: '512x512', quality: 'low', output_format: 'gif' });
+        expect(sentJson().size).toBe('512x512');
+        expect(((await res.json()) as { data: Array<{ b64_json: string }> }).data[0].b64_json).toBe(up);
+    });
+
+    it('GIF 1024²:放不进拼图 → 400,不打上游', async () => {
+        const res = await gen({ size: '1024x1024', quality: 'low', output_format: 'gif' });
+        expect(res.status).toBe(400);
+        expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('GIF 被交成 PNG → 原地重打一次', async () => {
+        const gif = (await animatedGif(816, 9, 200)).toString('base64');
+        fetchMock.mockImplementationOnce(async () => jsonRes(await png(816)));
+        fetchMock.mockImplementationOnce(async () => jsonRes(gif));
+        const res = await gen({ size: '816x816', quality: 'low', output_format: 'gif' });
+        expect(res.status).toBe(200);
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('GIF 改图:帧参数本地处理,10 帧以上 400', async () => {
+        fetchMock.mockImplementation(async () => jsonRes((await animatedGif(816, 9, 200)).toString('base64')));
+        const ok = await edit({ size: '816x816', quality: 'low', output_format: 'gif', frame_count: '3' });
+        expect(ok.status).toBe(200);
+        expect(sentForm().get('frame_count')).toBeNull();
+        const j = (await ok.json()) as { data: Array<{ b64_json: string }> };
+        expect((await framesOf(j.data[0].b64_json)).pages).toBe(3);
+        const tooMany = await edit({ size: '816x816', quality: 'low', output_format: 'gif', frame_count: '10' });
+        expect(tooMany.status).toBe(400);
+    });
+
+    it('错误体脱敏:one_hub / 图床域不外泄', async () => {
+        const p = (await import('@/lib/image-adapter25/providers')).IMAGE_PROVIDERS_25.yobox26;
+        expect('YoBoxAI one_hub_error img5.kjlw.uk'.replace(p.brand, '*')).toBe('* * img5.*.uk');
+    });
+});
