@@ -11,6 +11,9 @@
  *  - poll:只记有信息量的 —— 出错(含没打到上游的 401/403/404/400)/ 状态迁移 / 终态;
  *    上游错误只记「真打了上游」那次(缓存重放不刷屏);ENTERPRISE_REQLOG_POLL_ALL=1 临时全量;
  *  - reconcile:对账器补的终态动作(补扣 / 标失败 / 过期);
+ *  - delete(2026-11-18):客户 DELETE 任务(取消排队 / 删除记录)全量记录 —— 删除会抹掉任务行,
+ *    之后轮询一律 404 task not found;不落这一行,后台时间线上任务就像凭空消失
+ *    (jingdong cgt-20261118073737-n96ws 排障实例)。outcome = cancelled(非终态)/ deleted(终态);
  *  - asset_action(P2 2026-09-04):素材库 /api Action 全量(CRUD + 真人认证;量级远低于
  *    轮询,全记;format 列复用为素材落库位置 platform | kuaizi)。
  *
@@ -32,7 +35,7 @@ const MAX_INLINE_STRING = 2048; // 入参里超过这个长度的字符串按媒
 const MAX_ERROR_MESSAGE = 500;
 
 export interface RequestLogCtx {
-    kind: 'submit' | 'poll' | 'reconcile' | 'asset_action' | 'callback';
+    kind: 'submit' | 'poll' | 'reconcile' | 'asset_action' | 'callback' | 'delete';
     format?: 'v1' | 'ark' | 'platform' | 'kuaizi';
     startedAt: number;
     userId?: string | null;
@@ -148,7 +151,7 @@ export interface ReqlogFilters {
 }
 
 const REGIONS = new Set(['cn', 'global', 'promax', 'volc']);
-const KINDS = new Set(['submit', 'poll', 'reconcile', 'asset_action']);
+const KINDS = new Set(['submit', 'poll', 'reconcile', 'asset_action', 'callback', 'delete']);
 
 /** 筛选参数 → prisma where(后台列表页与 CSV 导出共用,保证两边结果一致)。 */
 export function buildReqlogWhere(f: ReqlogFilters): Record<string, unknown> {

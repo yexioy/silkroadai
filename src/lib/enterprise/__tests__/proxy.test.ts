@@ -16,7 +16,13 @@ const {
     chargeEnterpriseVideoTask,
 } = vi.hoisted(() => ({
     db: {
-        seedanceVideoTask: { create: vi.fn(), findUnique: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
+        seedanceVideoTask: {
+            create: vi.fn(),
+            findUnique: vi.fn(),
+            update: vi.fn(),
+            updateMany: vi.fn(),
+            delete: vi.fn(async () => ({})),
+        },
         account: { findUnique: vi.fn() },
         enterpriseRequestLog: { create: vi.fn(async () => ({})) },
     },
@@ -40,9 +46,10 @@ const { uploadImage } = vi.hoisted(() => ({
     uploadImage: vi.fn(async (key: string) => `https://images.silkroadai.io/${key}.jpg`),
 }));
 vi.mock('@/lib/r2/client', () => ({ uploadImage }));
+const { cancelVideoWithKey } = vi.hoisted(() => ({ cancelVideoWithKey: vi.fn(async () => new Response(null)) }));
 vi.mock('@/lib/seedance/cn-adapter', async (importOriginal) => {
     const mod = await importOriginal<typeof import('@/lib/seedance/cn-adapter')>();
-    return { ...mod, submitVideoWithKey, pollVideoWithKey };
+    return { ...mod, submitVideoWithKey, pollVideoWithKey, cancelVideoWithKey };
 });
 vi.mock('@/lib/seedance/volc-adapter', async (importOriginal) => {
     const mod = await importOriginal<typeof import('@/lib/seedance/volc-adapter')>();
@@ -2672,5 +2679,87 @@ describe('样片出正片(draft_task,2026-10-08)', () => {
         const b2 = (await q2.json()) as Record<string, unknown>;
         expect(b2.draft).toBe(true);
         expect('draft_task_id' in b2).toBe(false);
+    });
+});
+
+describe('DELETE 任务 → 请求日志落行(2026-11-18)', () => {
+    // 删除会抹掉任务行,之后轮询一律 404;不记 DELETE,后台时间线上任务像凭空消失
+    // (jingdong cgt-20261118073737-n96ws:提交 4 分半后客户自己 DELETE,随后轮询 2 小时 404)。
+    const flush = () => new Promise((r) => setTimeout(r, 0));
+    const reqlogRows = () =>
+        (db.enterpriseRequestLog.create.mock.calls as unknown as Array<[{ data: Record<string, unknown> }]>).map(
+            (c) => c[0].data,
+        );
+    const del = (id: string) =>
+        handleEnterpriseArkV3(
+            req('DELETE', `/api/v3/contents/generations/tasks/${id}`),
+            `/contents/generations/tasks/${id}`,
+        );
+    // 前面的用例把 create 设成过 reject(clearAllMocks 不清实现)—— 这里恢复成写入成功。
+    beforeEach(() => {
+        db.enterpriseRequestLog.create.mockResolvedValue({});
+    });
+    const taskRow = (status: string) => ({
+        id: 'cgt-d1',
+        user_id: 'u1',
+        tier: 'enterprise-portal',
+        model: 'seedance-2-0',
+        status,
+    });
+
+    it('排队中任务 → 204,取消上游 + 删行,落 kind=delete / outcome=cancelled', async () => {
+        db.seedanceVideoTask.findUnique.mockResolvedValue(taskRow('queued'));
+        const res = await del('cgt-d1');
+        expect(res.status).toBe(204);
+        expect(cancelVideoWithKey).toHaveBeenCalledTimes(1);
+        expect(db.seedanceVideoTask.delete).toHaveBeenCalledWith({ where: { id: 'cgt-d1' } });
+        await flush();
+        const rows = reqlogRows();
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+            kind: 'delete',
+            format: 'ark',
+            user_id: 'u1',
+            key_id: 'k1',
+            region: 'cn',
+            model: 'seedance-2-0',
+            task_id: 'cgt-d1',
+            http_status: 204,
+            outcome: 'cancelled',
+            error_code: null,
+        });
+    });
+
+    it('终态任务 → 204,不打上游,outcome=deleted', async () => {
+        db.seedanceVideoTask.findUnique.mockResolvedValue(taskRow('completed'));
+        const res = await del('cgt-d1');
+        expect(res.status).toBe(204);
+        expect(cancelVideoWithKey).not.toHaveBeenCalled();
+        await flush();
+        expect(reqlogRows()[0]).toMatchObject({ kind: 'delete', http_status: 204, outcome: 'deleted' });
+    });
+
+    it('任务不存在 / 非本人 → 404 也落行(error_code=not_found,无 outcome),不删库', async () => {
+        db.seedanceVideoTask.findUnique.mockResolvedValue({ ...taskRow('queued'), user_id: 'someone-else' });
+        const res = await del('cgt-d1');
+        expect(res.status).toBe(404);
+        expect(db.seedanceVideoTask.delete).not.toHaveBeenCalled();
+        await flush();
+        expect(reqlogRows()[0]).toMatchObject({
+            kind: 'delete',
+            task_id: 'cgt-d1',
+            user_id: 'u1',
+            http_status: 404,
+            error_code: 'not_found',
+            outcome: null,
+        });
+    });
+
+    it('日志写失败不影响删除(fire-and-forget)', async () => {
+        db.seedanceVideoTask.findUnique.mockResolvedValue(taskRow('completed'));
+        db.enterpriseRequestLog.create.mockRejectedValue(new Error('db down'));
+        const res = await del('cgt-d1');
+        expect(res.status).toBe(204);
+        await flush();
     });
 });

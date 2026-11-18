@@ -333,14 +333,29 @@ async function handleListTasks(req: NextRequest): Promise<NextResponse> {
  *  或报错都不阻断客户删除,也绝不透传上游报错(#271)。一律删库任务记录(火山「删除任务记录」语义);
  *  已计费任务的对客 ¥ 账本条目在 ledger 独立留存,删任务行不影响对账。成功 → 204 无体。 */
 async function handleDeleteTask(req: NextRequest, taskId: string): Promise<NextResponse> {
+    // 请求日志(2026-11-18):删除全量落行(含被拒的)。删除会抹掉任务行,之后轮询一律 404 ——
+    // 不记这一行,后台「同任务时间线」上就只剩 submit + 一串 404,看不出是客户自己删的。
+    const ctx = newRequestLogCtx('delete', 'ark', req);
+    ctx.taskId = taskId;
+    const res = await handleDeleteTaskInner(req, taskId, ctx);
+    writeRequestLog(ctx, res);
+    return res;
+}
+
+async function handleDeleteTaskInner(req: NextRequest, taskId: string, ctx: RequestLogCtx): Promise<NextResponse> {
     const cust = await resolveOr401(req);
     if (cust instanceof NextResponse) return cust;
+    ctx.userId = cust.userId;
+    ctx.keyId = cust.keyId;
 
     const task = await prisma.seedanceVideoTask.findUnique({ where: { id: taskId } });
     if (!task || task.tier !== ENTERPRISE_TIER || task.user_id !== cust.userId) {
         return errJson(404, 'not_found', 'task not found');
     }
     const taskRegion: SeedanceRegion = regionForModel(task.model);
+    ctx.model = task.model;
+    ctx.region = taskRegion;
+    ctx.statusBefore = task.status;
     if (taskRegion !== 'volc' && !cust.accountLevel && cust.region !== taskRegion) {
         return errJson(
             403,
@@ -368,6 +383,8 @@ async function handleDeleteTask(req: NextRequest, taskId: string): Promise<NextR
         .delete({ where: { id: taskId } })
         .catch((e) => console.warn('[enterprise-proxy] delete task row failed', { taskId, err: String(e) }));
 
+    // 非终态 = 取消排队(未产生计费);终态 = 仅删除记录(已计费的账本条目独立留存)。
+    ctx.outcome = task.status === 'completed' || task.status === 'failed' ? 'deleted' : 'cancelled';
     return new NextResponse(null, { status: 204 });
 }
 
