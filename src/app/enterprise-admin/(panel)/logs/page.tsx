@@ -20,6 +20,7 @@ const KIND_LABEL: Record<string, string> = {
     reconcile: '对账',
     asset_action: '素材',
     callback: '回调',
+    delete: '删除',
 };
 
 function resultBadge(l: { http_status: number | null; upstream_status: number | null; outcome: string | null }) {
@@ -27,6 +28,8 @@ function resultBadge(l: { http_status: number | null; upstream_status: number | 
         return (
             <span className="rounded bg-green-50 px-1.5 py-0.5 text-xs font-medium text-green-700">{l.outcome}</span>
         );
+    if (l.outcome === 'deleted' || l.outcome === 'cancelled')
+        return <span className="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-medium text-gray-700">{l.outcome}</span>;
     if (l.outcome)
         return <span className="rounded bg-red-50 px-1.5 py-0.5 text-xs font-medium text-red-600">{l.outcome}</span>;
     if (l.http_status != null && l.http_status >= 400)
@@ -194,6 +197,7 @@ export default async function EnterpriseAdminLogsPage({
                     <option value="poll">轮询</option>
                     <option value="reconcile">对账</option>
                     <option value="callback">回调</option>
+                    <option value="delete">删除</option>
                     <option value="asset_action">素材库</option>
                 </select>
                 <select
