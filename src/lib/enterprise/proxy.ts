@@ -77,13 +77,13 @@ import {
 export type ClientFormat = 'v1' | 'ark';
 
 /** 企业门户对客模型名(2026-07-20 归一,operator 拍板):按量计费下分辨率是参数不是模型名。
- *  `resolution` 参数选 480p/720p/1080p/4k(默认 720p;4k 仅 pro;480p 与 720p 同费率),带参考图/视频/音频自动识别
+ *  `resolution` 参数选 480p/720p/1080p/4k(默认 720p;4k 仅 pro 与国内版 2.5;480p 与 720p 同费率),带参考图/视频/音频自动识别
  *  (不再需要 -ref 后缀)。旧 14 个长名(seedance2.0-pro-720p 等)保留兼容,不再对外宣传。 */
 export const ENTERPRISE_MODELS: Record<string, SeedanceVariant> = {
     'seedance-2-0': 'pro',
     'seedance-2-0-fast': 'fast',
     'seedance-2-0-mini': 'mini',
-    // 国内版 seedance 2.5(2026-08-07):新代模型,仅 480p/720p,费率独立
+    // 国内版 seedance 2.5(2026-08-07):新代模型,480p/720p/1080p/4k,费率独立
     'seedance-2-5': '2.5',
     // 海外版(2026-07-23):同厂商国际端口,协议/档位/定价与国内一致,仅出片节点在海外(BytePlus)
     'seedance-2-0-global': 'pro',
@@ -192,7 +192,9 @@ function resolveEnterpriseModel(
             ),
         };
     }
-    if (resRaw === '4k' && variant !== 'pro' && variant !== 'promax') {
+    // 4k:2.0 pro(cn / global)、proMax pro、国内版 seedance-2-5(2026-11-19 开档;variant '2.5' 只有 cn,
+    // global / proMax 的 2.5 是 'promax-2.5',仍无 4k)。
+    if (resRaw === '4k' && variant !== 'pro' && variant !== 'promax' && variant !== '2.5') {
         const tiers = region === 'promax' ? '720p / 1080p' : '480p / 720p / 1080p';
         return { error: errJson(400, 'invalid_request', `${rawModel} 无 4k 档(resolution 仅 ${tiers})`) };
     }
@@ -221,7 +223,7 @@ function resolveEnterpriseModel(
             ),
         };
     }
-    // seedance 2.5(cn):480p / 720p / 1080p(480p 走原版 260628 上游,2026-09-07 开档;4k 由上方通用门拦)
+    // seedance 2.5(cn):480p / 720p / 1080p / 4k(480p 2026-09-07 开档;4k 2026-11-19 开档,与 720p/1080p 同走 pro 版 260801)
     const hasRefs =
         extractImageUrls(body).length > 0 ||
         extractVideoUrls(body).length > 0 ||

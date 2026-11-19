@@ -638,7 +638,7 @@ describe('seedance 2.5 判定(2026-08-07,国内版新代)', () => {
         expect(regionForModel('seedance-2-5')).toBe('cn');
     });
 
-    it('MODEL_MAP:480p/720p/1080p × {无ref,-ref} 六档;720p+ 走 pro 版、480p 走原版 260628,region 缺省 cn', async () => {
+    it('MODEL_MAP:480p/720p/1080p/4k × {无ref,-ref} 八档;720p+ 走 pro 版、480p 走原版 260628,region 缺省 cn', async () => {
         const { MODEL_MAP } = await import('../cn-adapter');
         for (const name of ['seedance2.5-720p', 'seedance2.5-720p-ref', 'seedance2.5-1080p', 'seedance2.5-1080p-ref']) {
             expect(MODEL_MAP[name]).toBeTruthy();
@@ -653,7 +653,15 @@ describe('seedance 2.5 判定(2026-08-07,国内版新代)', () => {
             expect(MODEL_MAP[name].upstream).toBe('doubao-seedance-2-5-260628');
             expect(MODEL_MAP[name].region).toBeUndefined();
         }
-        expect(MODEL_MAP['seedance2.5-4k']).toBeUndefined(); // 无 4k
+        // 4k(2026-11-19 开档)与 720p/1080p 同走 artsdance pro 版(doubao-260628 @4k 上游实测被拒),不打标 svcinf
+        for (const name of ['seedance2.5-4k', 'seedance2.5-4k-ref']) {
+            expect(MODEL_MAP[name]).toBeTruthy();
+            expect(MODEL_MAP[name].variant).toBe('2.5');
+            expect(MODEL_MAP[name].resolution).toBe('4k');
+            expect(MODEL_MAP[name].upstream).toBe('artsdance-2-5-pro-260801');
+            expect(MODEL_MAP[name].provider).toBeUndefined();
+            expect(MODEL_MAP[name].region).toBeUndefined();
+        }
     });
 });
 
@@ -942,6 +950,28 @@ describe('国内版 2.5 480p 单档 → service-inference.ai(缺省 /v2,env 可�
         expect(svcSubmitCall()).toBeUndefined();
         expect(submitBody().model).toBe('artsdance-2-5-pro-260801');
         expect(rememberVolcId).not.toHaveBeenCalled();
+    });
+
+    it('seedance2.5-4k(2026-11-19 开档):走 xinhankr artsdance pro 版 + resolution=4k,不走 svcinf', async () => {
+        const res = await submitVideo(makeReq({ model: 'seedance2.5-4k', prompt: 'x' }));
+        expect(res.status).toBe(200);
+        expect(svcSubmitCall()).toBeUndefined();
+        expect(submitBody().model).toBe('artsdance-2-5-pro-260801');
+        expect(submitBody().resolution).toBe('4k');
+        expect(rememberVolcId).not.toHaveBeenCalled();
+    });
+
+    it('draft_task + 4k 正片(cn):svcinf 线 4k 未核实 → 400,不查样片、不打上游', async () => {
+        const res = await submitVideo(
+            makeReq({
+                model: 'seedance2.5-4k',
+                content: [{ type: 'draft_task', draft_task: { id: 'cgt-client-draft' } }],
+            }),
+        );
+        expect(res.status).toBe(400);
+        const j = (await res.json()) as { error: { message: string } };
+        expect(j.error.message).toContain('4k');
+        expect(mockFetch).not.toHaveBeenCalled();
     });
 
     // 2026-10-08 样片出正片(火山官方 draft_task):客户样片号 → volc_id_map 拿 mvt- → GET 上游任务取

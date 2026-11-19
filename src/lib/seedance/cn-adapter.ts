@@ -72,6 +72,8 @@ const UPSTREAM_GLOBAL_25 = process.env.SEEDANCE_GLOBAL_MODEL_25 || UPSTREAM_PROM
 // 国内版 seedance 2.5(2026-08-07):国内版渠道(token.xinhankr)上游新代模型。
 // 上游名 2026-08-08 由 doubao-seedance-2-5-260628 换成 artsdance-2-5-pro-260801
 // (实测:新名支持 720p/1080p、【不支持 480p】;旧名支持 480p/720p)。费率独立(含视/无视两档)。
+// 4k(2026-11-19 开档,挂牌 无视 ¥31 / 含视 ¥19 每 1M):同走 pro 版 260801 —— 当日实测 artsdance-2-5-pro-260801 @4k
+// 受理出片,doubao-seedance-2-5-260628 @4k 3/3 被拒「当前分辨率 4k 不支持」(国内版上游本就是 artsdance 系)。
 const UPSTREAM_XHK_25 = process.env.SEEDANCE_XHK_MODEL_25 || 'artsdance-2-5-pro-260801';
 // 480p 单档走 260628(pro 版 260801 拒 480p)。⚠️ 用 doubao- 前缀名而非 artsdance- 名:
 // 2026-09-09 实测 artsdance-2-5-260628 @480p 后端只有 ~50% 支持(12 打 6 随机「480p 不支持」,
@@ -243,9 +245,10 @@ export const MODEL_MAP: Record<string, SeedanceModelSpec> = {
         ),
     ),
     // ── 国内 seedance 2.5(cn):费率独立;720p/1080p 走 pro 版 260801;480p 走 service-inference.ai
-    //    (2026-09-22 起,未配 key 回落 xinhankr doubao-260628,见 UPSTREAM_XHK_25_480P / getSvcinfCnConfig)──
+    //    (2026-09-22 起,未配 key 回落 xinhankr doubao-260628,见 UPSTREAM_XHK_25_480P / getSvcinfCnConfig);
+    //    4k(2026-11-19 开档)与 720p/1080p 同走 pro 版 260801 ──
     ...Object.fromEntries(
-        (['480p', '720p', '1080p'] as const).flatMap((resolution) =>
+        (['480p', '720p', '1080p', '4k'] as const).flatMap((resolution) =>
             [false, true].map((ref) => [
                 `seedance2.5-${resolution}${ref ? '-ref' : ''}`,
                 {
@@ -881,6 +884,14 @@ export async function submitVideoWithKey(body: Record<string, unknown>, auth: st
                 'draft_task(样片出正片)仅 2.5 系模型支持(seedance-2-5 / seedance-2-5-global / seedance-2-5-promax)',
             );
         const draftRegion = map.region ?? 'cn';
+        // cn 2.5 的 4k 档只在 xinhankr 线开通;样片出正片强制走 service-inference.ai,那条线的 4k 未核实
+        //(能否出片、成本价都不明)→ 先拦,不拿未验证的组合按 4k 费率收钱。
+        if (draftRegion === 'cn' && map.resolution === '4k')
+            return err(
+                400,
+                'invalid_request',
+                'draft_task(样片出正片)暂不支持 4k 档,正片 resolution 请用 480p / 720p / 1080p',
+            );
         svc = svcinfConfigForRegion(draftRegion, auth);
         if (!svc) return err(503, 'temporarily_unavailable', '样片出正片上游未配置,请联系服务方');
         const r = await resolveDraftTaskArkId(svc, draftRef.id, 'seedance-cn-adapter');
