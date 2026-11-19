@@ -60,6 +60,11 @@ const OFFICIAL_CNY_PER_M: Record<
         // 4k(2026-11-19,仅国内版渠道开档;火山渠道 2.5 仍无 4k)。必须显式列:缺了会回落 pro 4k 的 26/16 少收。
         '4k': { noVideo: 31, withVideo: 19 }, // 官方挂牌
     },
+    // seedance 2.5 flash(国内版轻量档,2026-11-19):仅 480p/720p,挂牌与 2.0 pro 同档同价。
+    '2.5-flash': {
+        '480p': { noVideo: 46, withVideo: 28 }, // 官方挂牌(与 720p 同费率)
+        '720p': { noVideo: 46, withVideo: 28 }, // 官方挂牌
+    },
     // 海外版proMax(2026-07-23,dreamina 系):dreamina 官方挂牌(上游对我们 9 折)。
     promax: {
         '480p': { noVideo: 68, withVideo: 40.8 }, // 官方挂牌(与 720p 同费率)
@@ -118,9 +123,15 @@ export function computeCostCny(
  *  实际扣费用轮询回来的真 usage.completion_tokens。 */
 const TOK_PER_SEC: Record<Resolution, number> = { '480p': 10128, '720p': 21774, '1080p': 48992, '4k': 195970 };
 
-/** 估算 token 数(预估用;独立门户 enterprise/billing 也复用同一锚点)。 */
-export function estimateTokens(resolution: Resolution, duration: number): number {
-    return TOK_PER_SEC[resolution] * Math.max(1, duration || 5);
+/** 预估放大系数(按变体)。seedance 2.5 flash 上游回报的 token 不服从「像素 × 帧」公式:2026-11-19 实测
+ *  480p 文生 4s = 52,421(锚点 40,512,×1.29)、智能时长 5s = 72,656(×1.43)、参考视频 4s 入 + 4s 出 = 115,890(×1.43)。
+ *  余额门按 1.5× 估,免得压线任务完成后透支;实扣仍只认 usage.completion_tokens。 */
+const ESTIMATE_FACTOR: Partial<Record<SeedanceVariant, number>> = { '2.5-flash': 1.5 };
+
+/** 估算 token 数(预估用;独立门户 enterprise/billing 也复用同一锚点)。variant 缺省不放大。 */
+export function estimateTokens(resolution: Resolution, duration: number, variant?: SeedanceVariant): number {
+    const factor = (variant && ESTIMATE_FACTOR[variant]) || 1;
+    return Math.round(TOK_PER_SEC[resolution] * Math.max(1, duration || 5) * factor);
 }
 
 /** 提交前的成本预估(用于余额门)。参考视频还会加输入视频 token,故预估偏低 —— 加 1.5× 缓冲。 */
@@ -130,7 +141,7 @@ export function estimateCostCny(
     hasVideo: boolean,
     variant: SeedanceVariant = 'pro',
 ): number {
-    const base = computeCostCny(estimateTokens(resolution, duration), resolution, hasVideo, variant);
+    const base = computeCostCny(estimateTokens(resolution, duration, variant), resolution, hasVideo, variant);
     return hasVideo ? +(base * 1.5).toFixed(6) : base;
 }
 

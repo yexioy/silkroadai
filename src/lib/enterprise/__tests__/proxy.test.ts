@@ -440,6 +440,65 @@ describe('火山渠道(volc)路由', () => {
         );
     });
 
+    it('seedance-2-5-flash(2026-11-19):480p / 720p → 长名 seedance2.5-flash-{res}[-ref],任务行存短名', async () => {
+        submitVideoWithKey.mockImplementation(() =>
+            Promise.resolve(NextResponse.json({ id: 't25f', task_id: 't25f', status: 'queued' })),
+        );
+        const res = await handleEnterpriseV1(
+            req('POST', '/v1/video/generations', { model: 'seedance-2-5-flash', prompt: 'x', resolution: '480p' }),
+            '/video/generations',
+        );
+        expect(res.status).toBe(200);
+        expect(submitVideoWithKey).toHaveBeenCalledWith(
+            expect.objectContaining({ model: 'seedance2.5-flash-480p' }),
+            expect.anything(),
+        );
+        expect(db.seedanceVideoTask.create).toHaveBeenCalledWith({
+            data: expect.objectContaining({ model: 'seedance-2-5-flash', resolution: '480p' }),
+        });
+        submitVideoWithKey.mockClear();
+        // 缺省分辨率 720p + 带参考图 → -ref
+        await handleEnterpriseV1(
+            req('POST', '/v1/video/generations', {
+                model: 'seedance-2-5-flash',
+                prompt: 'x',
+                images: ['https://cdn/a.jpg'],
+            }),
+            '/video/generations',
+        );
+        expect(submitVideoWithKey).toHaveBeenCalledWith(
+            expect.objectContaining({ model: 'seedance2.5-flash-720p-ref' }),
+            expect.anything(),
+        );
+    });
+
+    it('seedance-2-5-flash:1080p / 4k / draft:true → 400,不打上游', async () => {
+        for (const extra of [{ resolution: '1080p' }, { resolution: '4k' }, { draft: true }]) {
+            const res = await handleEnterpriseV1(
+                req('POST', '/v1/video/generations', { model: 'seedance-2-5-flash', prompt: 'x', ...extra }),
+                '/video/generations',
+            );
+            expect(res.status).toBe(400);
+        }
+        expect(submitVideoWithKey).not.toHaveBeenCalled();
+    });
+
+    it('seedance-2-5-flash 时长上限 30(同 2.5):30 接受,31 → 400', async () => {
+        submitVideoWithKey.mockImplementation(() =>
+            Promise.resolve(NextResponse.json({ id: 't25f-d', task_id: 't25f-d', status: 'queued' })),
+        );
+        const ok = await handleEnterpriseV1(
+            req('POST', '/v1/video/generations', { model: 'seedance-2-5-flash', prompt: 'x', duration: 30 }),
+            '/video/generations',
+        );
+        expect(ok.status).toBe(200);
+        const bad = await handleEnterpriseV1(
+            req('POST', '/v1/video/generations', { model: 'seedance-2-5-flash', prompt: 'x', duration: 31 }),
+            '/video/generations',
+        );
+        expect(bad.status).toBe(400);
+    });
+
     it('海外版 global 2.5 仍无 4k:传 4k → 400,不打上游', async () => {
         const res = await handleEnterpriseV1(
             req('POST', '/v1/video/generations', { model: 'seedance-2-5-global', prompt: 'x', resolution: '4k' }),
@@ -608,7 +667,7 @@ describe('isEnterpriseFlavor', () => {
 });
 
 describe('分发白名单', () => {
-    it('GET /models → 12 个归一短名(国内 3 + 2.5 + global 3 + global 2.5 + promax 3 + promax 2.5)', async () => {
+    it('GET /models → 13 个归一短名(国内 3 + 2.5 + 2.5 flash + global 3 + global 2.5 + promax 3 + promax 2.5)', async () => {
         const res = await handleEnterpriseV1(req('GET', '/v1/models'), '/models');
         const j = (await res.json()) as { data: Array<{ id: string }> };
         expect(res.status).toBe(200);
@@ -617,6 +676,7 @@ describe('分发白名单', () => {
             'seedance-2-0-fast',
             'seedance-2-0-mini',
             'seedance-2-5',
+            'seedance-2-5-flash',
             'seedance-2-0-global',
             'seedance-2-0-global-fast',
             'seedance-2-0-global-mini',

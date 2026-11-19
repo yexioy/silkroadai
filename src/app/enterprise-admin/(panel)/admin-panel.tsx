@@ -415,6 +415,7 @@ export function AdminPanel() {
                         <option value="fast">fast</option>
                         <option value="mini">mini</option>
                         <option value="2.5">2.5</option>
+                        <option value="2.5-flash">2.5-flash</option>
                         <option value="promax">promax</option>
                         <option value="promax-fast">promax-fast</option>
                         <option value="promax-mini">promax-mini</option>
@@ -681,6 +682,7 @@ export function AdminPanel() {
                                     <option value="fast">fast</option>
                                     <option value="mini">mini</option>
                                     <option value="2.5">2.5</option>
+                                    <option value="2.5-flash">2.5-flash</option>
                                     <option value="promax">promax</option>
                                     <option value="promax-fast">promax-fast</option>
                                     <option value="promax-mini">promax-mini</option>

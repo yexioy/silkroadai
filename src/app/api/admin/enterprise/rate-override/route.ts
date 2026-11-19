@@ -17,7 +17,7 @@ const schema = z.object({
     user_id: z.string().uuid(),
     region: z.enum(['cn', 'global', 'promax', 'volc']).default('cn'),
     variant: z
-        .enum(['pro', 'fast', 'mini', '2.5', 'promax', 'promax-fast', 'promax-mini', 'promax-2.5'])
+        .enum(['pro', 'fast', 'mini', '2.5', '2.5-flash', 'promax', 'promax-fast', 'promax-mini', 'promax-2.5'])
         .default('pro'),
     // 0.05~2(>1 = 上浮);null = 删除该 (客户,渠道,模型) 议价折扣
     discount: z.number().min(0.05).max(2).nullable(),

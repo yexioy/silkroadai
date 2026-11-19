@@ -80,6 +80,10 @@ const UPSTREAM_XHK_25 = process.env.SEEDANCE_XHK_MODEL_25 || 'artsdance-2-5-pro-
 // 720p 却 100% 稳),doubao-seedance-2-5-260628 @480p 是 28/28 全稳(含 audio=false)——
 // 同一底模,doubao- 名路由到全支持 480p 的稳定后端。720p/1080p 仍走 pro 版 260801。
 const UPSTREAM_XHK_25_480P = process.env.SEEDANCE_XHK_MODEL_25_480P || 'doubao-seedance-2-5-260628';
+// 国内版 seedance 2.5 flash(2026-11-19):上游新模型,2.5 的轻量档 —— 仅 480p/720p、无样片模式、
+// 参考素材上限 10 图 / 5 视频 / 5 音频(2.5 是 30/10/10),时长同 2.5(4~30 / -1);费率 = 2.0 pro 的 480p/720p 档(¥46 / ¥28)。
+// 上游同时挂着 -261101 与 -261115 两个名,operator 指定 261101;要换用 env 覆盖。
+const UPSTREAM_XHK_25_FLASH = process.env.SEEDANCE_XHK_MODEL_25_FLASH || 'artsdance-2-5-flash-261101';
 // 2026-09-22 起 480p 单档改走 service-inference.ai(operator 拍板,与火山渠道同一家上游、独立 key;2026-09-27 起 /v2):
 // 上游模型名 `doubao-seedance-2-5-260628-max`(本平台套餐形态,GET /v1/models 为准),协议见 svcinf-client。
 // 只有配了 SEEDANCE_SVCINF_KEY 才切;未配回落上面的 xinhankr 260628(部署缺 env 不断档)。
@@ -195,16 +199,26 @@ const MAX_REF_VIDEOS = 3;
 
 /** seedance 变体(2026-07-19 加 fast/mini;2026-07-23 加 promax 系,费率独立;
  *  2026-08-07 加 '2.5' = 国内版新代模型,费率独立):费率按 variant × resolution × 含视频 分档。 */
-export type SeedanceVariant = 'pro' | 'fast' | 'mini' | '2.5' | 'promax' | 'promax-fast' | 'promax-mini' | 'promax-2.5';
+export type SeedanceVariant =
+    | 'pro'
+    | 'fast'
+    | 'mini'
+    | '2.5'
+    | '2.5-flash'
+    | 'promax'
+    | 'promax-fast'
+    | 'promax-mini'
+    | 'promax-2.5';
 
 /** 单次输入素材上限(按变体)。seedance 2.5(2026-08-07 上游放宽):30 图 + 10 视频 + 10 音频;
  *  其余档沿用默认 9 图 / 3 视频 / 音频不限数(Infinity —— 保留旧行为,只需「音频需配图」约束)。
  *  上限比上游宽或等 —— 超限我们先 400 给清晰文案,不白打上游。 */
 const REF_LIMITS: Partial<Record<SeedanceVariant, { images: number; videos: number; audios: number }>> = {
     '2.5': { images: 30, videos: 10, audios: 10 },
+    '2.5-flash': { images: 10, videos: 5, audios: 5 },
 };
 /** 可「纯音频」提交的变体(火山官方:仅 Seedance 2.5 支持单独传入音频;2.0 系须配 ≥1 视频或图)。 */
-const AUDIO_ONLY_VARIANTS: ReadonlySet<SeedanceVariant> = new Set<SeedanceVariant>(['2.5', 'promax-2.5']);
+const AUDIO_ONLY_VARIANTS: ReadonlySet<SeedanceVariant> = new Set<SeedanceVariant>(['2.5', '2.5-flash', 'promax-2.5']);
 function refLimitsFor(variant: SeedanceVariant): { images: number; videos: number; audios: number } {
     return REF_LIMITS[variant] ?? { images: MAX_REF_IMAGES, videos: MAX_REF_VIDEOS, audios: Infinity };
 }
@@ -261,6 +275,15 @@ export const MODEL_MAP: Record<string, SeedanceModelSpec> = {
                         ? { provider: 'svcinf' as const, svcinfModel: UPSTREAM_SVCINF_25_480P }
                         : {}),
                 },
+            ]),
+        ),
+    ),
+    // ── 国内 seedance 2.5 flash(cn,2026-11-19):仅 480p/720p,全走 xinhankr(不经 service-inference.ai)──
+    ...Object.fromEntries(
+        (['480p', '720p'] as const).flatMap((resolution) =>
+            [false, true].map((ref) => [
+                `seedance2.5-flash-${resolution}${ref ? '-ref' : ''}`,
+                { resolution, ref, variant: '2.5-flash' as const, upstream: UPSTREAM_XHK_25_FLASH },
             ]),
         ),
     ),
@@ -376,6 +399,8 @@ export function variantForModel(model: string): SeedanceVariant {
     // 海外版 global 2.5 与 promax-2.5 同费率(2026-08-31,operator 拍板同价)——
     // 必须先于纯 2.5 判,否则落到 cn '2.5' 档(70/90)按错价计费。
     if (is25 && m.includes('-global')) return 'promax-2.5';
+    // 2.5 flash(国内版轻量档,2026-11-19):费率独立(= 2.0 pro 档),必须先于纯 2.5 判,否则按 70/42 多收。
+    if (is25 && m.includes('-flash')) return '2.5-flash';
     if (is25) return '2.5';
     if (m.includes('-promax')) {
         // promax 系费率独立,必须先于 -fast/-mini 判(seedance-2-0-promax-fast 含 '-fast')
@@ -388,10 +413,10 @@ export function variantForModel(model: string): SeedanceVariant {
     return 'pro';
 }
 
-/** 单次生成时长上限(秒):seedance 2.5 系 = 30s(火山官方 2026-08 提升,4~30);
+/** 单次生成时长上限(秒):seedance 2.5 系(含 flash)= 30s(火山官方 2026-08 提升,4~30);
  *  2.0 全系仍 15s(4~15)。低于 4 或超上限 → 调用方回落缺省 5(cn-adapter/cn-proxy)或 400(proxy)。 */
 export function maxDurationForVariant(v: SeedanceVariant): number {
-    return v === '2.5' || v === 'promax-2.5' ? 30 : 15;
+    return v === '2.5' || v === '2.5-flash' || v === 'promax-2.5' ? 30 : 15;
 }
 
 /** 合法时长:-1(智能时长)或 [4, maxDur] 的整数秒。 */
