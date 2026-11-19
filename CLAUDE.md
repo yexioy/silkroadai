@@ -301,7 +301,7 @@ silkroadai/
 
 - [ ] 分支 `feat/enterprise-seedance25-4k`(代码完成,**待部署**)— 上游 xinhankr 的 2.5 放开 4k,企业门户国内版 `seedance-2-5`(方舟形 `doubao-seedance-2-5-260628` 的 cn 客户同)同步接受 `resolution: "4k"`。
     - **上游模型名**:4k 与 720p/1080p 同走 `artsdance-2-5-pro-260801`。上游定价页把 4k 挂在 `doubao-seedance-2-5-260628` 名下,但该名 @4k 实测 3/3 被拒「当前分辨率 4k 不支持」;国内版上游是 artsdance 系(operator 确认)。
-    - **费率**:`cn-billing` `'2.5'` 补 4k 档 **无视 ¥31 / 含视 ¥19**(每 1M,官方挂牌;上游给我们 7.8 折)。不补会回落 pro 4k 的 26/16 **少收**。
+    - **费率**:`cn-billing` `'2.5'` 补 4k 档 **无视 ¥31 / 含视 ¥19**(每 1M,官方挂牌;上游定价页当时对 2.5 标 7.8 折,operator 同日告知国内版上游现给我们 **6 折**)。不补会回落 pro 4k 的 26/16 **少收**。
     - **门控**:`proxy.resolveEnterpriseModel` 的 4k 门放行 variant `'2.5'`(只有 cn;global / proMax 的 2.5 是 `'promax-2.5'`,仍无 4k);火山渠道 `doubao-seedance-2.5` 仍无 4k(`VOLC_RESOLUTIONS` 未动)。**样片出正片 + 4k 先拦 400**:那条路强制走 service-inference.ai,其 4k 能否出片 / 成本价未核实。
     - **真金实测**(平台 `SEEDANCE_XHK_KEY` 直打上游,文生 4s 带音频):成片 **3840×2160**、4.065s、22MB,耗时约 9 分钟,`completion_tokens=785700`(`TOK_PER_SEC['4k']` 预估 783,880,差 0.2%)→ 挂牌 ¥24.36。**未实测**:带参考图 / 参考视频(含视档)/ 首尾帧 / 长时长的 4k;客户自带 cn key 是否同样开通 4k。
     - 客户文档 `/enterprise/docs` 价目表 + `resolution` 参数说明已补 4k。无 migration、无新依赖、无新 env。部署面 = server1 seedance-portal×3 + `deploy-enterprise-replicas.sh`(server2 / server3 企业副本)。
@@ -314,7 +314,7 @@ silkroadai/
     - **费率**:`cn-billing` 新档 `'2.5-flash'` 480p / 720p 均 **无视 ¥46 / 含视 ¥28**(与 2.0 pro 同价)。`variantForModel` 的 flash 判定必须先于纯 2.5,否则按 70/42 多收。
     - ⚠️ **flash 的 token 量不服从像素公式**(2.0 / 2.5 都服从):480p 文生 4s = 52,421(公式 ≈40.5k,×1.29)、`duration:-1` 出 5s = 72,656(×1.43)、参考图 + 4s 参考视频 + 4s 出 = 115,890(×1.43)、720p 首帧方图(720×720)4s = 83,420。按 token 透传计费毛利不受影响,但**同秒数下 flash 480p 的对客金额比 2.0 pro 高三四成**,客户按公式估价会对不上。因此:余额门 `estimateTokens` 对 flash 乘 1.5;探测失败时「按 token 反推秒数」的兜底对 flash 关掉。
     - **门控**(`proxy.resolveEnterpriseModel`):非 480p/720p、`draft:true` → 400 不打上游;样片出正片由适配器按变体拦;素材超 10/5/5 → 400。后台折扣(global-discount / rate-override + 面板下拉)加 `2.5-flash` 档;`/models`(v1 13 个短名、ark 5 个 id)与 `/enterprise/docs` 同步。
-    - **实测成片**:480p = **854×480**(2.0 / 2.5 是 864×496)、24fps、带音轨;首帧 + `ratio:adaptive` 跟随输入图比例;出片约 2.5 分钟。**未实测**:参考音频 / 纯音频、尾帧、视频编辑 / 延长、`tools`(web_search)、长时长。探测共 4 条成片,上游成本约 ¥8。
+    - **实测成片**:480p = **854×480**(2.0 / 2.5 是 864×496)、24fps、带音轨;首帧 + `ratio:adaptive` 跟随输入图比例;出片约 2.5 分钟。**未实测**:参考音频 / 纯音频、尾帧、视频编辑 / 延长、`tools`(web_search)、长时长。探测共 4 条成片,按 6 折算上游成本约 ¥7.7。
     - 无 migration、无新依赖;新 env 仅可选的 `SEEDANCE_XHK_MODEL_25_FLASH`。部署面同上一条(server1 seedance-portal×3 + 企业副本)。
 
 ### 国内版 seedance-2-5 480p 单档换上游 → service-inference.ai /v1(2026-09-22)
