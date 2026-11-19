@@ -196,7 +196,8 @@ export const VOLC_RESOLUTIONS: Record<SeedanceVariant, ReadonlyArray<'480p' | '7
     fast: ['480p', '720p'],
     mini: ['480p', '720p'],
     '2.5': ['480p', '720p', '1080p'],
-    // proMax 系不在 volc 渠道(海外档,走 cn-adapter);列全只为类型完整。
+    // 2.5 flash / proMax 系不在 volc 渠道(走 cn-adapter);列全只为类型完整。
+    '2.5-flash': [],
     promax: [],
     'promax-fast': [],
     'promax-mini': [],

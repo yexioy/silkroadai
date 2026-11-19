@@ -15,7 +15,7 @@ export const runtime = 'nodejs';
  */
 const schema = z.object({
     region: z.enum(['cn', 'global', 'promax', 'volc']),
-    variant: z.enum(['pro', 'fast', 'mini', '2.5', 'promax', 'promax-fast', 'promax-mini', 'promax-2.5']),
+    variant: z.enum(['pro', 'fast', 'mini', '2.5', '2.5-flash', 'promax', 'promax-fast', 'promax-mini', 'promax-2.5']),
     // 0.05~2(>1 = 上浮);null = 清除该档全局折扣(回落客户折扣率)
     discount: z.number().min(0.05).max(2).nullable(),
     // 到期时间(ISO 字符串;null / 省略 = 手动撤销前长期有效)

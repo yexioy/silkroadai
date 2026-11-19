@@ -665,6 +665,76 @@ describe('seedance 2.5 判定(2026-08-07,国内版新代)', () => {
     });
 });
 
+describe('seedance 2.5 flash(国内版轻量档,2026-11-19)', () => {
+    const urls = (n: number, p: string) => Array.from({ length: n }, (_, i) => `https://cdn/${p}${i}.jpg`);
+
+    it('variantForModel / regionForModel:短名与长名 → 2.5-flash(先于纯 2.5 判,防按 2.5 费率多收),region cn', async () => {
+        const { variantForModel, regionForModel } = await import('../cn-adapter');
+        expect(variantForModel('seedance-2-5-flash')).toBe('2.5-flash');
+        expect(variantForModel('seedance2.5-flash-720p-ref')).toBe('2.5-flash');
+        expect(regionForModel('seedance-2-5-flash')).toBe('cn');
+        // 不误伤 2.5 与 2.0 fast
+        expect(variantForModel('seedance-2-5')).toBe('2.5');
+        expect(variantForModel('seedance-2-0-fast')).toBe('fast');
+    });
+
+    it('MODEL_MAP:仅 480p/720p × {无ref,-ref} 四档,上游 artsdance-2-5-flash-261101,不打标 svcinf', async () => {
+        const { MODEL_MAP } = await import('../cn-adapter');
+        for (const name of [
+            'seedance2.5-flash-480p',
+            'seedance2.5-flash-480p-ref',
+            'seedance2.5-flash-720p',
+            'seedance2.5-flash-720p-ref',
+        ]) {
+            expect(MODEL_MAP[name]).toBeTruthy();
+            expect(MODEL_MAP[name].variant).toBe('2.5-flash');
+            expect(MODEL_MAP[name].upstream).toBe('artsdance-2-5-flash-261101');
+            expect(MODEL_MAP[name].provider).toBeUndefined();
+            expect(MODEL_MAP[name].region).toBeUndefined();
+        }
+        expect(MODEL_MAP['seedance2.5-flash-1080p']).toBeUndefined();
+        expect(MODEL_MAP['seedance2.5-flash-4k']).toBeUndefined();
+    });
+
+    it('提交:打 xinhankr flash 模型,时长 30 放行(同 2.5)', async () => {
+        const res = await submitVideo(makeReq({ model: 'seedance2.5-flash-480p', prompt: 'x', duration: 30 }));
+        expect(res.status).toBe(200);
+        expect(submitBody().model).toBe('artsdance-2-5-flash-261101');
+        expect(submitBody().resolution).toBe('480p');
+        expect(submitBody().duration).toBe(30);
+    });
+
+    it('参考素材上限 10 图 / 5 视频 / 5 音频:压线放行,超一个 → 400', async () => {
+        const ok = await submitVideo(
+            makeReq({
+                model: 'seedance2.5-flash-720p-ref',
+                prompt: 'x',
+                images: urls(10, 'img'),
+                reference_videos: urls(5, 'vid'),
+            }),
+        );
+        expect(ok.status).toBe(200);
+        for (const over of [
+            { images: urls(11, 'img') },
+            { reference_videos: urls(6, 'vid') },
+            { image: 'https://cdn/a.jpg', audios: urls(6, 'aud') },
+        ]) {
+            const res = await submitVideo(makeReq({ model: 'seedance2.5-flash-720p-ref', prompt: 'x', ...over }));
+            expect(res.status).toBe(400);
+        }
+    });
+
+    it('draft_task(样片出正片)不支持 → 400', async () => {
+        const res = await submitVideo(
+            makeReq({
+                model: 'seedance2.5-flash-720p',
+                content: [{ type: 'draft_task', draft_task: { id: 'cgt-client-draft' } }],
+            }),
+        );
+        expect(res.status).toBe(400);
+    });
+});
+
 describe('单次输入上限(按变体,2026-08-07)', () => {
     const urls = (n: number, p: string) => Array.from({ length: n }, (_, i) => `https://cdn/${p}${i}.jpg`);
 

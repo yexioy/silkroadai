@@ -6,7 +6,7 @@
  * 账单口径:官方价(本表)× 客户折扣率 = 实付;默认折扣 8.5 折 = computeCostCny。
  */
 import { describe, expect, it } from 'vitest';
-import { computeCostCny, officialCostCny, RETAIL_RATIO } from '../cn-billing';
+import { computeCostCny, estimateTokens, officialCostCny, RETAIL_RATIO } from '../cn-billing';
 import type { SeedanceVariant } from '../cn-adapter';
 
 /** 官方挂牌价(¥/1M token):[变体][分辨率] = [无视频, 含视频]。来源 = 费率表注释里的挂牌值。 */
@@ -22,6 +22,8 @@ const OFFICIAL: Array<[SeedanceVariant, string, number, number]> = [
     ['2.5', '720p', 70, 42],
     ['2.5', '1080p', 77, 46],
     ['2.5', '4k', 31, 19],
+    ['2.5-flash', '480p', 46, 28],
+    ['2.5-flash', '720p', 46, 28],
     ['promax', '720p', 68, 40.8],
     ['promax', '1080p', 73.44, 44.88],
     ['promax', '4k', 38.08, 23.12],
@@ -61,6 +63,17 @@ describe('官方挂牌价 = 文档价目表口径', () => {
                 3,
             );
         }
+    });
+});
+
+describe('余额门 token 预估', () => {
+    it('2.5 flash 按 1.5× 估(上游回报 token 高于像素公式,2026-11-19 实测);其余变体不放大', () => {
+        expect(estimateTokens('480p', 4)).toBe(40512);
+        expect(estimateTokens('480p', 4, '2.5')).toBe(40512);
+        expect(estimateTokens('480p', 4, '2.5-flash')).toBe(60768);
+        // 实测三个样本都落在预估之内:文生 4s 52,421 / 智能时长 5s 72,656
+        expect(estimateTokens('480p', 4, '2.5-flash')).toBeGreaterThan(52421);
+        expect(estimateTokens('480p', 5, '2.5-flash')).toBeGreaterThan(72656);
     });
 });
 
