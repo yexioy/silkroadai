@@ -26,7 +26,7 @@ export type Resolution = '480p' | '720p' | '1080p' | '4k';
 export type { SeedanceVariant } from './cn-adapter';
 import { variantForModel, type SeedanceVariant } from './cn-adapter';
 
-/** 【火山官方挂牌价】(元/1M token):[变体][分辨率][是否含视频输入]。上游给我们 0.75。
+/** 【火山官方挂牌价】(元/1M token):[变体][分辨率][是否含视频输入]。国内版上游(xinhankr)给我们 6 折(2026-11-19 operator 告知;此前 0.75)。
  *  2026-07-19 加 fast/mini;2026-08-03 全变体加 480p(上游挂牌 480p 与 720p 统一价,
  *  见 artsdance/dreamina 定价页 —— token 量 ∝ 像素,480p 整条约为 720p 的一半价)。
  *  ⚠️ 此表【不含任何折扣】;零售/客户折扣由调用方显式乘(见文件头口径说明)。 */
