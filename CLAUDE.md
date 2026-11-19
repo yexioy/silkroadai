@@ -297,6 +297,15 @@ silkroadai/
     - **价格**:上游按 USD/token 计价(`GET /v1/models` pricing 按 `<res>_<no_ref|with_ref>` 分桶,with_ref 仅 reference_video),pro/2.5 480p·720p 恰 = 我们挂牌 ¥ ÷ 6.70;7.2 汇率下 pro/2.5 主档成本高于挂牌,operator 自行谈价(费率表未动)。
     - env:`ENTERPRISE_VOLC_UPSTREAM_BASE_URL` / `ENTERPRISE_VOLC_UPSTREAM_KEY`(替代 `ENTERPRISE_KUAIZI_*`)+ 可选 `ENTERPRISE_VOLC_MODEL_{PRO,FAST,MINI,25}`(缺省方舟 id + `-max`)。无 migration、无新依赖。部署 = 只重建 3 个 `seedance-portal` 副本。
 
+### 国内版 seedance-2-5 开 4k 档(2026-11-19)
+
+- [ ] 分支 `feat/enterprise-seedance25-4k`(代码完成,**待部署**)— 上游 xinhankr 的 2.5 放开 4k,企业门户国内版 `seedance-2-5`(方舟形 `doubao-seedance-2-5-260628` 的 cn 客户同)同步接受 `resolution: "4k"`。
+    - **上游模型名**:4k 与 720p/1080p 同走 `artsdance-2-5-pro-260801`。上游定价页把 4k 挂在 `doubao-seedance-2-5-260628` 名下,但该名 @4k 实测 3/3 被拒「当前分辨率 4k 不支持」;国内版上游是 artsdance 系(operator 确认)。
+    - **费率**:`cn-billing` `'2.5'` 补 4k 档 **无视 ¥31 / 含视 ¥19**(每 1M,官方挂牌;上游给我们 7.8 折)。不补会回落 pro 4k 的 26/16 **少收**。
+    - **门控**:`proxy.resolveEnterpriseModel` 的 4k 门放行 variant `'2.5'`(只有 cn;global / proMax 的 2.5 是 `'promax-2.5'`,仍无 4k);火山渠道 `doubao-seedance-2.5` 仍无 4k(`VOLC_RESOLUTIONS` 未动)。**样片出正片 + 4k 先拦 400**:那条路强制走 service-inference.ai,其 4k 能否出片 / 成本价未核实。
+    - **真金实测**(平台 `SEEDANCE_XHK_KEY` 直打上游,文生 4s 带音频):成片 **3840×2160**、4.065s、22MB,耗时约 9 分钟,`completion_tokens=785700`(`TOK_PER_SEC['4k']` 预估 783,880,差 0.2%)→ 挂牌 ¥24.36。**未实测**:带参考图 / 参考视频(含视档)/ 首尾帧 / 长时长的 4k;客户自带 cn key 是否同样开通 4k。
+    - 客户文档 `/enterprise/docs` 价目表 + `resolution` 参数说明已补 4k。无 migration、无新依赖、无新 env。部署面 = server1 seedance-portal×3 + `deploy-enterprise-replicas.sh`(server2 / server3 企业副本)。
+
 ### 国内版 seedance-2-5 480p 单档换上游 → service-inference.ai /v1(2026-09-22)
 
 - [x] 分支 `feat/cn-25-480p-svcinf` — 此前 480p 单档走 xinhankr `doubao-seedance-2-5-260628`(#446/#450),现改走 **service-inference.ai `/v1/video/generate` + `/v1/video/tasks/{id}`**(operator 指定 /v1;实测与 /v2 信封一致、直传 URL 参考图可用),上游模型 `doubao-seedance-2-5-260628-max`,**独立 key `SEEDANCE_SVCINF_KEY`**(与火山渠道的 `ENTERPRISE_VOLC_UPSTREAM_KEY` 不同一把)。720p/1080p 仍走 xinhankr pro 版 260801。

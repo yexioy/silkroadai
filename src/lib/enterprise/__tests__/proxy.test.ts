@@ -408,9 +408,41 @@ describe('火山渠道(volc)路由', () => {
         });
     });
 
-    it('seedance-2-5 无 4k:传 4k → 400,不打上游', async () => {
+    it('seedance-2-5 4k(2026-11-19 开档):→ 长名 seedance2.5-4k,带参考图 → seedance2.5-4k-ref', async () => {
+        submitVideoWithKey.mockImplementation(() =>
+            Promise.resolve(NextResponse.json({ id: 't25-4k', task_id: 't25-4k', status: 'queued' })),
+        );
         const res = await handleEnterpriseV1(
             req('POST', '/v1/video/generations', { model: 'seedance-2-5', prompt: 'x', resolution: '4k' }),
+            '/video/generations',
+        );
+        expect(res.status).toBe(200);
+        expect(submitVideoWithKey).toHaveBeenCalledWith(
+            expect.objectContaining({ model: 'seedance2.5-4k' }),
+            expect.anything(),
+        );
+        expect(db.seedanceVideoTask.create).toHaveBeenCalledWith({
+            data: expect.objectContaining({ model: 'seedance-2-5', resolution: '4k' }),
+        });
+        submitVideoWithKey.mockClear();
+        await handleEnterpriseV1(
+            req('POST', '/v1/video/generations', {
+                model: 'seedance-2-5',
+                prompt: 'x',
+                resolution: '4k',
+                images: ['https://cdn/a.jpg'],
+            }),
+            '/video/generations',
+        );
+        expect(submitVideoWithKey).toHaveBeenCalledWith(
+            expect.objectContaining({ model: 'seedance2.5-4k-ref' }),
+            expect.anything(),
+        );
+    });
+
+    it('海外版 global 2.5 仍无 4k:传 4k → 400,不打上游', async () => {
+        const res = await handleEnterpriseV1(
+            req('POST', '/v1/video/generations', { model: 'seedance-2-5-global', prompt: 'x', resolution: '4k' }),
             '/video/generations',
         );
         expect(res.status).toBe(400);
