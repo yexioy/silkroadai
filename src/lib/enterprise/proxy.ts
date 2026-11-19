@@ -22,6 +22,7 @@ import {
     pollVideoWithKey,
     cancelVideoWithKey,
     regionForModel,
+    variantForModel,
     maxDurationForVariant,
     resolveRequestedDuration,
     type SeedanceModelSpec,
@@ -85,6 +86,8 @@ export const ENTERPRISE_MODELS: Record<string, SeedanceVariant> = {
     'seedance-2-0-mini': 'mini',
     // 国内版 seedance 2.5(2026-08-07):新代模型,480p/720p/1080p/4k,费率独立
     'seedance-2-5': '2.5',
+    // 国内版 seedance 2.5 flash(2026-11-19):2.5 轻量档,仅 480p/720p,无样片模式,费率同 2.0 pro
+    'seedance-2-5-flash': '2.5-flash',
     // 海外版(2026-07-23):同厂商国际端口,协议/档位/定价与国内一致,仅出片节点在海外(BytePlus)
     'seedance-2-0-global': 'pro',
     'seedance-2-0-global-fast': 'fast',
@@ -192,6 +195,21 @@ function resolveEnterpriseModel(
             ),
         };
     }
+    // seedance 2.5 flash(cn):仅 480p / 720p;无样片模式(draft:true 上游拒;draft_task 由适配器按变体拦)。
+    if (variant === '2.5-flash') {
+        if (resRaw !== '480p' && resRaw !== '720p') {
+            return { error: errJson(400, 'invalid_request', `${rawModel} 仅支持 480p / 720p 档`) };
+        }
+        if (body.draft === true) {
+            return {
+                error: errJson(
+                    400,
+                    'invalid_request',
+                    `${rawModel} 不支持样片模式(draft);样片 / 样片出正片请用 seedance-2-5`,
+                ),
+            };
+        }
+    }
     // 4k:2.0 pro(cn / global)、proMax pro、国内版 seedance-2-5(2026-11-19 开档;variant '2.5' 只有 cn,
     // global / proMax 的 2.5 是 'promax-2.5',仍无 4k)。
     if (resRaw === '4k' && variant !== 'pro' && variant !== 'promax' && variant !== '2.5') {
@@ -236,11 +254,13 @@ function resolveEnterpriseModel(
     const longName =
         variant === '2.5'
             ? `seedance2.5-${resRaw}${ref}`
-            : variant === 'promax-2.5'
-              ? region === 'global'
-                  ? `seedance2.5-global-${resRaw}${ref}`
-                  : `seedance2.5-promax-${resRaw}${ref}`
-              : `seedance2.0-${region === 'global' ? 'global-' : ''}${variant}-${resRaw}${ref}`;
+            : variant === '2.5-flash'
+              ? `seedance2.5-flash-${resRaw}${ref}`
+              : variant === 'promax-2.5'
+                ? region === 'global'
+                    ? `seedance2.5-global-${resRaw}${ref}`
+                    : `seedance2.5-promax-${resRaw}${ref}`
+                : `seedance2.0-${region === 'global' ? 'global-' : ''}${variant}-${resRaw}${ref}`;
     const spec = MODEL_MAP[longName];
     if (!spec) {
         // 组合表齐全时到不了这里;防御性兜底
@@ -410,6 +430,12 @@ export async function handleEnterpriseArkV3(req: NextRequest, path: string): Pro
                     type: 'video_generation',
                 },
                 { id: 'doubao-seedance-2-5-260628', object: 'model', owned_by: 'doubao', type: 'video_generation' },
+                {
+                    id: 'doubao-seedance-2-5-flash-261115',
+                    object: 'model',
+                    owned_by: 'doubao',
+                    type: 'video_generation',
+                },
             ],
         });
     }
@@ -1223,7 +1249,8 @@ async function handlePollInner(
         }
         // 探测失败的兜底(仅回显、不落库,下次查询重测):无输入视频时 token 只含输出时长,
         // 按每秒 token 锚点反推整数秒。含输入视频的任务 token 混了输入时长,反推不出 → 保持 -1。
-        if (needDuration && actualDuration == null && !task.has_video) {
+        // 2.5 flash 的 token 不服从每秒锚点(上游回报偏高且不恒定),反推会把秒数算大 → 不反推,保持 -1。
+        if (needDuration && actualDuration == null && !task.has_video && variantForModel(task.model) !== '2.5-flash') {
             const usage = j.usage as { completion_tokens?: number; total_tokens?: number } | undefined;
             const tokens = usage?.completion_tokens ?? usage?.total_tokens ?? Number(task.tokens ?? 0);
             const perSec = estimateTokens(task.resolution as Resolution, 1);

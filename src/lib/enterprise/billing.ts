@@ -91,7 +91,7 @@ export async function estimateEnterpriseCostCny(
 ): Promise<number> {
     const base = await computeEnterpriseCostCny(
         userId,
-        estimateTokens(resolution, duration),
+        estimateTokens(resolution, duration, variant),
         resolution,
         hasVideo,
         variant,

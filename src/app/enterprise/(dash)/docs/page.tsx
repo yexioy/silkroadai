@@ -198,6 +198,15 @@ print(j.get("video_url"), j.get("usage"))`}</Pre>
                                 <Td>{listPrices('2.5', ['480p', '720p', '1080p', '4k'], false)}</Td>
                                 <Td>{listPrices('2.5', ['480p', '720p', '1080p', '4k'], true)}</Td>
                             </tr>
+                            <tr>
+                                <Td>
+                                    <Code>seedance-2-5-flash</Code>
+                                </Td>
+                                <Td>新代轻量档(国内版)</Td>
+                                <Td>480p / 720p</Td>
+                                <Td>{listPrices('2.5-flash', ['480p', '720p'], false)}</Td>
+                                <Td>{listPrices('2.5-flash', ['480p', '720p'], true)}</Td>
+                            </tr>
                         </tbody>
                     </table>
                 </div>
@@ -327,7 +336,8 @@ print(j.get("video_url"), j.get("usage"))`}</Pre>
                                 <Td>string</Td>
                                 <Td>是</Td>
                                 <Td>
-                                    seedance-2-0 / seedance-2-0-fast / seedance-2-0-mini / seedance-2-5(大小写不敏感)
+                                    seedance-2-0 / seedance-2-0-fast / seedance-2-0-mini / seedance-2-5 /
+                                    seedance-2-5-flash(大小写不敏感)
                                 </Td>
                             </tr>
                             <tr>
@@ -345,8 +355,8 @@ print(j.get("video_url"), j.get("usage"))`}</Pre>
                                 <Td>string</Td>
                                 <Td>否</Td>
                                 <Td>
-                                    480p / 720p(默认)/ 1080p / 4k(4k 仅 seedance-2-0 与 seedance-2-5;480p 与 720p
-                                    同费率)
+                                    480p / 720p(默认)/ 1080p / 4k(4k 仅 seedance-2-0 与 seedance-2-5;seedance-2-5-flash
+                                    仅 480p / 720p;480p 与 720p 同费率)
                                 </Td>
                             </tr>
                             <tr>
@@ -469,7 +479,7 @@ print(j.get("video_url"), j.get("usage"))`}</Pre>
                                 <Td>
                                     <Code>images</Code>
                                 </Td>
-                                <Td>string[](≤9;seedance-2-5 ≤30)</Td>
+                                <Td>string[](≤9;seedance-2-5 ≤30;seedance-2-5-flash ≤10)</Td>
                                 <Td>参考图(多图参考/主体一致性);素材组 ID 会按序展开为组内全部图</Td>
                             </tr>
                             <tr>
@@ -483,14 +493,14 @@ print(j.get("video_url"), j.get("usage"))`}</Pre>
                                 <Td>
                                     <Code>reference_videos</Code>
                                 </Td>
-                                <Td>string[](≤3;seedance-2-5 ≤10)</Td>
+                                <Td>string[](≤3;seedance-2-5 ≤10;seedance-2-5-flash ≤5)</Td>
                                 <Td>参考视频(风格/运动参考;输入视频时长计入 token,费率走「含视频输入」档,更低)</Td>
                             </tr>
                             <tr>
                                 <Td>
                                     <Code>audios</Code>
                                 </Td>
-                                <Td>string[](seedance-2-5 ≤10)</Td>
+                                <Td>string[](seedance-2-5 ≤10;seedance-2-5-flash ≤5)</Td>
                                 <Td>参考音频(需至少配一张参考图)</Td>
                             </tr>
                         </tbody>
@@ -593,8 +603,9 @@ print(j.get("video_url"), j.get("usage"))`}</Pre>
                     <Code>resolution</Code> 指定正片分辨率即可;提示词 / 参考素材 / 时长 / 比例 / 音频自动沿用样片,
                     不必(也不要)重复传。样片任务号必须是你名下、已完成的样片,7 天内有效;仅 2.5 系模型支持:国内版{' '}
                     <Code>doubao-seedance-2-5-260628</Code>(即 <Code>seedance-2-5</Code>)、海外版{' '}
-                    <Code>seedance-2-5-global</Code>、proMax <Code>seedance-2-5-promax</Code>;正片必须用与样片相同的模型
-                    / 渠道。查询响应回显 <Code>draft</Code> 与正片的 <Code>draft_task_id</Code>。
+                    <Code>seedance-2-5-global</Code>、proMax <Code>seedance-2-5-promax</Code>(
+                    <Code>seedance-2-5-flash</Code> 不支持样片模式);正片必须用与样片相同的模型 / 渠道。查询响应回显{' '}
+                    <Code>draft</Code> 与正片的 <Code>draft_task_id</Code>。
                 </p>
                 <p className="text-gray-600">
                     <b>查询响应对齐火山官方 2026-09 字段集</b>(国内版 / 火山渠道 / 海外版均适用):除 <Code>id</Code> /{' '}

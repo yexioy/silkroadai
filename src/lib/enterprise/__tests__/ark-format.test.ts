@@ -16,6 +16,10 @@ describe('normalizeArkModel', () => {
         expect(normalizeArkModel('doubao-seedance-2-0-mini-260615')).toBe('seedance-2-0-mini');
         expect(normalizeArkModel('doubao-seedance-2-5-260628')).toBe('seedance-2-5');
         expect(normalizeArkModel('SEEDANCE-2.5')).toBe('seedance-2-5');
+        // 2.5 flash(2026-11-19):带日期后缀的方舟 id / 无后缀 / 点分简写都归一到 seedance-2-5-flash
+        expect(normalizeArkModel('doubao-seedance-2-5-flash-261115')).toBe('seedance-2-5-flash');
+        expect(normalizeArkModel('doubao-seedance-2-5-flash')).toBe('seedance-2-5-flash');
+        expect(normalizeArkModel('seedance-2.5-flash')).toBe('seedance-2-5-flash');
     });
     it('未知/我们自己的名 → 原样(交后续 model_not_found)', () => {
         expect(normalizeArkModel('seedance-2-0-global')).toBe('seedance-2-0-global');
