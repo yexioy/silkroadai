@@ -9,11 +9,11 @@
  * (new-api 鉴权扣费 → seedream 适配器 → 图床转存 / 客户 OSS → 错误统一),回程只把 `model`
  * 回显成客户传入的名字。
  *
- * 只认 Seedream 5.0 两个模型(含官方模型 ID 别名);其余模型 404。官方的 `stream`(组图流式)
+ * 只认 Seedream 5.0 Pro / Flash 与 5.5 三个模型(含官方模型 ID 别名);其余模型 404。官方的 `stream`(组图流式)
  * 我们不支持 → 400 明确报错,免得客户端等 SSE 等到超时。
  */
 import { NextRequest, NextResponse } from 'next/server';
-import { SEEDREAM_FLASH_MODEL, SEEDREAM_MODEL, type SeedreamModel } from '@/lib/seedream/adapter';
+import { SEEDREAM_55_MODEL, SEEDREAM_FLASH_MODEL, SEEDREAM_MODEL, type SeedreamModel } from '@/lib/seedream/adapter';
 
 /** 官方模型 ID / 我们的对客名(小写)→ 对客规范名。 */
 const ARK_MODEL_ALIASES: Record<string, SeedreamModel> = {
@@ -24,6 +24,10 @@ const ARK_MODEL_ALIASES: Record<string, SeedreamModel> = {
     [SEEDREAM_FLASH_MODEL]: SEEDREAM_FLASH_MODEL,
     'doubao-seedream-5-0-flash-260915': SEEDREAM_FLASH_MODEL,
     'dola-seedream-5-0-flash-260915': SEEDREAM_FLASH_MODEL,
+    [SEEDREAM_55_MODEL]: SEEDREAM_55_MODEL,
+    'doubao-seedream-5-5-261028': SEEDREAM_55_MODEL,
+    'dola-seedream-5-5-261028': SEEDREAM_55_MODEL,
+    'dola-seedream-5-5-261028-ep': SEEDREAM_55_MODEL,
 };
 
 export function resolveArkSeedreamModel(model: unknown): SeedreamModel | null {
@@ -63,7 +67,7 @@ export async function handleArkSeedreamImages(req: NextRequest, v1: V1ImagesHand
             404,
             'InvalidEndpointOrModel.NotFound',
             `The model ${requested || '(empty)'} does not exist or you do not have access to it. ` +
-                `Supported: ${SEEDREAM_MODEL}, ${SEEDREAM_FLASH_MODEL}.`,
+                `Supported: ${SEEDREAM_MODEL}, ${SEEDREAM_FLASH_MODEL}, ${SEEDREAM_55_MODEL}.`,
             'model',
         );
     if (body.stream === true || body.stream === 'true')
