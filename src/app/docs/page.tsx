@@ -143,8 +143,8 @@ const AGENTS: AgentSection[] = [
     },
     {
         id: 'seedream-image',
-        label: 'Seedream 5.0 Pro / Flash 生图 · 图层拆分',
-        blurb: '字节 Seedream 5.0 Pro / Flash — 文生 / 图生(≤10 参考图)/ 图层拆分(底图 + 透明 PNG 图层带坐标)/ 透明背景;OpenAI Images 兼容 + 火山方舟原生 /api/v3 路径,按张计费,Flash ¥0.0612/张、Pro ¥0.15 起,需「seedream 5 pro」档 key。',
+        label: 'Seedream 5.5 / 5.0 Pro / Flash 生图 · 图层拆分',
+        blurb: '字节 Seedream 5.5 / 5.0 Pro / Flash — 文生 / 图生(≤10 参考图)/ 图层拆分(底图 + 透明 PNG 图层带坐标)/ 透明背景;OpenAI Images 兼容 + 火山方舟原生 /api/v3 路径,按张计费,Flash ¥0.0612/张、5.5 ¥0.102 起、Pro ¥0.15 起,需「seedream 5 pro」档 key。',
     },
     {
         id: 'midjourney',
@@ -4916,7 +4916,7 @@ curl "${OPENAI_BASE}/files/file-yyyy/content" \\
                     <div className="flex items-baseline justify-between flex-wrap gap-2 mb-4 pb-3 border-b-2 border-brand-accent">
                         <h2 className="m-0 text-2xl font-semibold text-navy">
                             <span className="text-brand-accent font-bold mr-3 tabular-nums">23</span>
-                            Seedream 5.0 Pro / Flash 生图 · 图层拆分
+                            Seedream 5.5 / 5.0 Pro / Flash 生图 · 图层拆分
                         </h2>
                     </div>
                     <p className="m-0 mb-3 text-sm text-ink leading-relaxed">
@@ -4935,15 +4935,20 @@ curl "${OPENAI_BASE}/files/file-yyyy/content" \\
                         <code className="font-mono text-xs bg-paper-muted px-1.5 py-0.5 rounded border border-brand-border text-navy">
                             seedream-5-0-flash
                         </code>{' '}
-                        (快速版,一口价更便宜),两者参数完全一致。现有 OpenAI SDK 改一行 base_url 即可;图生图既可走 JSON
-                        的 <code className="font-mono text-xs">image</code> 字段,也可用 SDK 的{' '}
+                        (快速版,一口价更便宜)或{' '}
+                        <code className="font-mono text-xs bg-paper-muted px-1.5 py-0.5 rounded border border-brand-border text-navy">
+                            seedream-5-5
+                        </code>{' '}
+                        (新一代 5.5),三者参数完全一致。现有 OpenAI SDK 改一行 base_url 即可;图生图既可走 JSON 的{' '}
+                        <code className="font-mono text-xs">image</code> 字段,也可用 SDK 的{' '}
                         <code className="font-mono text-xs">images.edit</code>(multipart)上传文件。
                     </p>
                     <div className="rounded-lg border border-brand-border bg-paper-muted px-4 py-3 mb-4 text-sm text-ink leading-relaxed">
                         ⚠️ 需先在「API 密钥」页创建一把 <strong className="text-navy">「seedream 5 pro」档</strong> 的
                         key(创建密钥时在档次里选它)。该 key 专用于{' '}
-                        <code className="font-mono text-xs">seedream-5-0-pro</code> 与{' '}
-                        <code className="font-mono text-xs">seedream-5-0-flash</code>;调别的模型请用对应档 key。
+                        <code className="font-mono text-xs">seedream-5-0-pro</code>、{' '}
+                        <code className="font-mono text-xs">seedream-5-0-flash</code> 与{' '}
+                        <code className="font-mono text-xs">seedream-5-5</code>;调别的模型请用对应档 key。
                     </div>
 
                     <p className="m-0 mb-2 text-sm font-medium text-navy">
@@ -4991,6 +4996,12 @@ curl "${OPENAI_BASE}/files/file-yyyy/content" \\
                         <strong className="text-navy">¥0.0612</strong> 一口价 —— 不分尺寸(1K–2K
                         同价),图层拆分的底图与每个图层各算 1 张,输入参考图不收费。
                     </p>
+                    <p className="m-0 mb-2 text-sm text-ink leading-relaxed">
+                        <strong className="text-navy">5.5 价格</strong>(seedream-5-5,按返回图实际像素分档):≤ 261
+                        万像素每张 <strong className="text-navy">¥0.102</strong>,&gt; 261 万像素每张{' '}
+                        <strong className="text-navy">¥0.1785</strong>;图层拆分的底图与每个图层各按同价算 1
+                        张;输入参考图每张 <strong className="text-navy">¥0.0408</strong>(无免费张)。
+                    </p>
                     <p className="m-0 mb-4 text-xs text-muted-ink leading-relaxed">
                         <code className="font-mono">n</code> 张 = n 次扣费;生成失败不扣费。 响应{' '}
                         <code className="font-mono">usage.total_tokens</code> 即本次扣费的计费单位(500,000 = ¥1),
@@ -5013,7 +5024,10 @@ curl "${OPENAI_BASE}/files/file-yyyy/content" \\
                             </thead>
                             <tbody>
                                 {[
-                                    ['model', 'seedream-5-0-pro(旗舰)或 seedream-5-0-flash(快速版)'],
+                                    [
+                                        'model',
+                                        'seedream-5-0-pro(旗舰)、seedream-5-0-flash(快速版)或 seedream-5-5(新一代 5.5)',
+                                    ],
                                     ['prompt', '画面 / 编辑意图。图层拆分时可空(自动拆全部要素)'],
                                     [
                                         'image',
@@ -5137,12 +5151,14 @@ print(r.data[0].url)`}</CodeBlock>
                         <code className="font-mono text-xs">POST /api/v3/images/generations</code>。model
                         可直接填官方模型 ID(
                         <code className="font-mono text-xs">doubao-seedream-5-0-pro-260628</code> /{' '}
-                        <code className="font-mono text-xs">doubao-seedream-5-0-flash-260915</code>,
+                        <code className="font-mono text-xs">doubao-seedream-5-0-flash-260915</code> /{' '}
+                        <code className="font-mono text-xs">doubao-seedream-5-5-261028</code>,
                         <code className="font-mono text-xs">dola-</code> 前缀同样可用),也可填本站名{' '}
                         <code className="font-mono text-xs">seedream-5-0-pro</code> /{' '}
-                        <code className="font-mono text-xs">seedream-5-0-flash</code>,响应里的 model
-                        原样回显你传的名字。 参数、价格、返回结构与上面完全一致;暂不支持{' '}
-                        <code className="font-mono text-xs">stream</code>(传 true 返回 400)。
+                        <code className="font-mono text-xs">seedream-5-0-flash</code> /{' '}
+                        <code className="font-mono text-xs">seedream-5-5</code>,响应里的 model 原样回显你传的名字。
+                        参数、价格、返回结构与上面完全一致;暂不支持 <code className="font-mono text-xs">stream</code>(传
+                        true 返回 400)。
                     </p>
                     <div className="mb-4">
                         <CodeBlock language="bash">{`curl https://ai.silkroadai.io/api/v3/images/generations \\

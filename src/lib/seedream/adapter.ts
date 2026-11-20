@@ -2,6 +2,7 @@
  * Seedream 5.0 图片适配器(service-inference.ai,2026-09-06):
  *   Pro   `seedream-5-0-pro`   → 上游 `dola-seedream-5-0-pro-260628-ep`
  *   Flash `seedream-5-0-flash` → 上游 `dola-seedream-5-0-flash-260915`(2026-10-23 接入)
+ *   5.5   `seedream-5-5`       → 上游 `dola-seedream-5-5-261028-ep`(2026-11-20 接入)
  *
  * 走 image-adapter / minimax 同款「portal 适配器 + new-api 渠道」模式:new-api 渠道(type=1 OpenAI,
  * base_url 指向本适配器,渠道 key = 上游 key,portal 不存 key)把客户的 OpenAI Images 形 JSON 请求
@@ -35,6 +36,11 @@
  *   (2026-10-23 /v1/models:flash 只有 image_count 一个计量单位 $0.0081 = 官方 × 0.45,无 pixel_tier、
  *   无 image_input_count。)
  * 上游给我们的成本 = 官方 × 0.45(/v1/models pricing 元数据),毛利 ≈ 售价的 10%。
+ * 【5.5】(2026-11-20 operator 拍板:官方 × 0.75,7.5 折;上游控制台给我们 = 官方 × 0.68)
+ *   输入参考图 $0.008/张(控制台定价页未标免费张数 → 每张都收)        → ¥0.0408/张 = 20,400 quota
+ *   生图      ≤2.61MP $0.02 / >2.61MP $0.035                        → ¥0.102 / ¥0.1785 每张 = 51,000 / 89,250 quota
+ *   图层拆分:定价页无单独价目 → 底图 + 每个图层按生图同价各算一张(不打对折,宁可不亏)。
+ *   ⚠️ 接入时未能直连上游探测(定价 / 能力取自控制台定价页截图);上线 smoke 后按实测校正。
  *
  * === 上游契约(Pro 2026-09-06 / Flash 2026-10-23 直连实测,两者一致)===
  *   POST /v1/images/generations,Bearer 上游 key;`size` 收 1K / 1.5K / 2K / WxH(面积 ≤ 4,624,220 px,
@@ -51,15 +57,18 @@ const SI_BASE = process.env.SEEDREAM_INF_BASE_URL || 'https://model.service-infe
 /** 对客模型名(new-api 渠道 models 只挂这些)。 */
 export const SEEDREAM_MODEL = 'seedream-5-0-pro';
 export const SEEDREAM_FLASH_MODEL = 'seedream-5-0-flash';
+export const SEEDREAM_55_MODEL = 'seedream-5-5';
 /** 上游模型名(service-inference.ai 上架名)。 */
 export const SEEDREAM_UPSTREAM_MODEL = 'dola-seedream-5-0-pro-260628-ep';
 export const SEEDREAM_FLASH_UPSTREAM_MODEL = 'dola-seedream-5-0-flash-260915';
+export const SEEDREAM_55_UPSTREAM_MODEL = 'dola-seedream-5-5-261028-ep';
 
-export type SeedreamModel = typeof SEEDREAM_MODEL | typeof SEEDREAM_FLASH_MODEL;
+export type SeedreamModel = typeof SEEDREAM_MODEL | typeof SEEDREAM_FLASH_MODEL | typeof SEEDREAM_55_MODEL;
 
 const UPSTREAM_BY_MODEL: Record<SeedreamModel, string> = {
     [SEEDREAM_MODEL]: SEEDREAM_UPSTREAM_MODEL,
     [SEEDREAM_FLASH_MODEL]: SEEDREAM_FLASH_UPSTREAM_MODEL,
+    [SEEDREAM_55_MODEL]: SEEDREAM_55_UPSTREAM_MODEL,
 };
 
 /** 上游单次生成实测 20–100s(图生图 1.5K 曾 97s);与链路其余各层(Caddy 3010 / undici)对齐 600s。 */
@@ -74,7 +83,7 @@ export function resolveSeedreamModel(model: string): SeedreamModel | null {
     const m = String(model || '')
         .trim()
         .toLowerCase();
-    return m === SEEDREAM_MODEL || m === SEEDREAM_FLASH_MODEL ? m : null;
+    return Object.hasOwn(UPSTREAM_BY_MODEL, m) ? (m as SeedreamModel) : null;
 }
 
 /** 是否本适配器负责的模型(大小写宽容)。 */
@@ -93,40 +102,52 @@ export const SEEDREAM_PRICING = {
     },
     /** Flash 官方 USD 牌价:一口价每张(不分尺寸 / 不分普通或图层;参考图免费)。2026-10-23。 */
     flashOfficialUsd: 0.018,
-    /** 我们对客 = 官方 × 0.5(5 折;2026-10-26 前为 0.55)。 */
+    /** 5.5 官方 USD 牌价(上游控制台定价页,2026-11-20):按像素分档;参考图每张都收;图层同生图价。 */
+    v55OfficialUsd: { low: 0.02, high: 0.035, inputImage: 0.008 },
+    /** 我们对客 = 官方 × 0.5(5 折;2026-10-26 前为 0.55)。Pro / Flash 用。 */
     sellDiscount: 0.5,
+    /** 5.5 对客 = 官方 × 0.75(7.5 折,2026-11-20 operator 拍板)。 */
+    v55SellDiscount: 0.75,
     /** 换算汇率(operator 指定)。 */
     usdToCny: 6.8,
     /** 2026-07-19 计价单位迁移后:500,000 quota = ¥1。 */
     quotaPerCny: 500_000,
     /** Pro 输入参考图免费张数(官方:第 1 张免费)。 */
     freeInputImages: 1,
-    /** Pro 像素分档阈值(含):≤ 走 low 档,> 走 high 档。上游 pixel_tier le_261w。 */
+    /** Pro / 5.5 像素分档阈值(含):≤ 走 low 档,> 走 high 档。上游 pixel_tier le_261w。 */
     pixelTierThreshold: 2_610_000,
 } as const;
 
 export type PixelTier = 'low' | 'high';
 
 /** 官方 USD 单价 → 我们的售价(quota)。 */
-export function sellQuota(officialUsd: number): number {
+export function sellQuota(officialUsd: number, discount: number = SEEDREAM_PRICING.sellDiscount): number {
     const p = SEEDREAM_PRICING;
-    return Math.round(officialUsd * p.sellDiscount * p.usdToCny * p.quotaPerCny);
+    return Math.round(officialUsd * discount * p.usdToCny * p.quotaPerCny);
 }
 
 export function pixelTier(w: number, h: number): PixelTier {
     return w * h <= SEEDREAM_PRICING.pixelTierThreshold ? 'low' : 'high';
 }
 
-/** 一张输出图的售价(quota)。Pro:普通生图 / 图层拆分两张表,按该图自身像素分档;Flash:一口价。 */
+/** 一张输出图的售价(quota)。Pro:普通生图 / 图层拆分两张表,按该图自身像素分档;Flash:一口价;
+ *  5.5:按像素分档,图层与普通生图同价。 */
 export function outputImageQuota(w: number, h: number, layer: boolean, model: SeedreamModel = SEEDREAM_MODEL): number {
     if (model === SEEDREAM_FLASH_MODEL) return sellQuota(SEEDREAM_PRICING.flashOfficialUsd);
+    if (model === SEEDREAM_55_MODEL)
+        return sellQuota(SEEDREAM_PRICING.v55OfficialUsd[pixelTier(w, h)], SEEDREAM_PRICING.v55SellDiscount);
     const table = layer ? SEEDREAM_PRICING.officialUsd.layer : SEEDREAM_PRICING.officialUsd.single;
     return sellQuota(table[pixelTier(w, h)]);
 }
 
-/** 输入参考图售价(quota)。Pro:第 1 张免费,其余按张;Flash:不收费。 */
+/** 输入参考图售价(quota)。Pro:第 1 张免费,其余按张;Flash:不收费;5.5:每张都收。 */
 export function inputImagesQuota(count: number, model: SeedreamModel = SEEDREAM_MODEL): number {
     if (model === SEEDREAM_FLASH_MODEL) return 0;
+    if (model === SEEDREAM_55_MODEL)
+        return (
+            Math.max(0, Math.floor(count)) *
+            sellQuota(SEEDREAM_PRICING.v55OfficialUsd.inputImage, SEEDREAM_PRICING.v55SellDiscount)
+        );
     const paid = Math.max(0, Math.floor(count) - SEEDREAM_PRICING.freeInputImages);
     return paid * sellQuota(SEEDREAM_PRICING.officialUsd.inputImage);
 }

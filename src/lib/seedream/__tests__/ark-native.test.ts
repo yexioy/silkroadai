@@ -24,6 +24,9 @@ describe('seedream 方舟原生路径', () => {
         expect(resolveArkSeedreamModel(' Seedream-5-0-Pro ')).toBe('seedream-5-0-pro');
         expect(resolveArkSeedreamModel('doubao-seedream-5-0-flash-260915')).toBe('seedream-5-0-flash');
         expect(resolveArkSeedreamModel('dola-seedream-5-0-flash-260915')).toBe('seedream-5-0-flash');
+        expect(resolveArkSeedreamModel('doubao-seedream-5-5-261028')).toBe('seedream-5-5');
+        expect(resolveArkSeedreamModel('dola-seedream-5-5-261028-ep')).toBe('seedream-5-5');
+        expect(resolveArkSeedreamModel('Seedream-5-5')).toBe('seedream-5-5');
         expect(resolveArkSeedreamModel('seedream-4-5-251128')).toBeNull();
         expect(resolveArkSeedreamModel(undefined)).toBeNull();
     });

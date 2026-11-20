@@ -7,7 +7,7 @@ export async function POST() {
         {
             error: {
                 message:
-                    'seedream-5-0-pro does not accept multipart /v1/images/edits here; send JSON to /v1/images/generations with an `image` field (URL or base64 data URL)',
+                    'seedream models do not accept multipart /v1/images/edits here; send JSON to /v1/images/generations with an `image` field (URL or base64 data URL)',
                 type: 'invalid_request_error',
                 param: null,
                 code: 'unsupported_endpoint',

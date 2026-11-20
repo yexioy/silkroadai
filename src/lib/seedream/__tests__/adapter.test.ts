@@ -19,6 +19,8 @@ import {
     isSeedreamModel,
     SEEDREAM_MODEL,
     SEEDREAM_UPSTREAM_MODEL,
+    SEEDREAM_55_MODEL,
+    SEEDREAM_55_UPSTREAM_MODEL,
     SEEDREAM_FLASH_MODEL,
     SEEDREAM_FLASH_UPSTREAM_MODEL,
     resolveSeedreamModel,
@@ -120,6 +122,40 @@ describe('seedream pricing (官方 USD × 0.5 × 6.8;500k quota = ¥1)', () => {
         expect(outputImageQuota(2048, 2048, false)).toBe(153_000);
         expect(outputImageQuota(1020, 806, true)).toBe(38_250);
         expect(outputImageQuota(2048, 2048, true)).toBe(76_500);
+    });
+    it('5.5(官方 × 0.75):按像素分档 51,000 / 89,250;图层同价;参考图每张 20,400(无免费张)', () => {
+        expect(sellQuota(0.02, 0.75)).toBe(51_000); // ≤2.61MP ¥0.102
+        expect(sellQuota(0.035, 0.75)).toBe(89_250); // >2.61MP ¥0.1785
+        expect(sellQuota(0.008, 0.75)).toBe(20_400); // 参考图 ¥0.0408
+        expect(outputImageQuota(1024, 1024, false, SEEDREAM_55_MODEL)).toBe(51_000);
+        expect(outputImageQuota(1615, 1615, false, SEEDREAM_55_MODEL)).toBe(51_000);
+        expect(outputImageQuota(2048, 2048, false, SEEDREAM_55_MODEL)).toBe(89_250);
+        expect(outputImageQuota(1020, 806, true, SEEDREAM_55_MODEL)).toBe(51_000);
+        expect(inputImagesQuota(0, SEEDREAM_55_MODEL)).toBe(0);
+        expect(inputImagesQuota(1, SEEDREAM_55_MODEL)).toBe(20_400);
+        expect(inputImagesQuota(3, SEEDREAM_55_MODEL)).toBe(61_200);
+        expect(
+            synthSeedreamUsage({
+                outputs: [{ w: 2048, h: 2048 }],
+                layer: false,
+                inputImages: 2,
+                model: SEEDREAM_55_MODEL,
+            }),
+        ).toEqual({
+            input_tokens: 40_800,
+            output_tokens: 89_250,
+            total_tokens: 130_050,
+            input_images: 2,
+            generated_images: 1,
+        });
+    });
+    it('5.5 模型名解析 + 上游名脱敏', () => {
+        expect(resolveSeedreamModel(' Seedream-5-5 ')).toBe(SEEDREAM_55_MODEL);
+        expect(isSeedreamModel(SEEDREAM_55_UPSTREAM_MODEL)).toBe(false);
+        expect(isSeedreamModel('toString')).toBe(false);
+        expect(sanitizeUpstreamMessage(`model ${SEEDREAM_55_UPSTREAM_MODEL} rejected`)).toBe(
+            `model ${SEEDREAM_55_MODEL} rejected`,
+        );
     });
     it('输入图:第 1 张免费,第 2 张起按张', () => {
         expect(inputImagesQuota(0)).toBe(0);
