@@ -70,3 +70,14 @@ export function maskDimensionError(mask: Dims, image: Dims): string | null {
     if (mask.w === image.w && mask.h === image.h) return null;
     return `Invalid mask image: mask must have the same dimensions as the image (${image.w}x${image.h}), got ${mask.w}x${mask.h}.`;
 }
+
+/** PNG 签名前 4 字节(\x89PNG)。只比前 4 字节:足以区分 JPEG / WebP / GIF / 文本,且与仓内其它魔数嗅探一致。 */
+const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+
+/** 蒙版必须是 PNG(官方约束:`mask` must be a valid PNG file)。按字节魔数判,不信文件名 / Content-Type。
+ *  2026-11-19 客户反馈:JPEG 字节改名 .png 当蒙版 —— 有的上游静默忽略蒙版整图重绘(200 + 计费),
+ *  有的上游挂到客户端超时;官方是立即 400。 */
+export function maskFormatError(buf: Buffer): string | null {
+    if (buf.length >= PNG_MAGIC.length && buf.subarray(0, PNG_MAGIC.length).equals(PNG_MAGIC)) return null;
+    return 'Invalid mask image: mask must be a valid PNG file.';
+}

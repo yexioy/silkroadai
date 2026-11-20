@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { jsonMaskShapeError, maskDimensionError, multipartMaskShapeError } from '../mask';
+import { jsonMaskShapeError, maskDimensionError, maskFormatError, multipartMaskShapeError } from '../mask';
 
 describe('jsonMaskShapeError(2026-11-02 客户:非法 mask 一律 200 出图)', () => {
     it.each([undefined, null, '', 'data:image/png;base64,AAAA', 'https://x.test/m.png'])(
@@ -77,5 +77,20 @@ describe('maskDimensionError', () => {
         expect(maskDimensionError({ w: 512, h: 512 }, { w: 1024, h: 1536 })).toBe(
             'Invalid mask image: mask must have the same dimensions as the image (1024x1536), got 512x512.',
         );
+    });
+});
+
+describe('maskFormatError(2026-11-19 客户:JPEG 改名 .png 当蒙版 200 出图 / 挂起)', () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]);
+    it('PNG 魔数 → 合法', () => {
+        expect(maskFormatError(png)).toBeNull();
+    });
+    it.each([
+        ['JPEG', Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46])],
+        ['WebP', Buffer.from('RIFF\0\0\0\0WEBPVP8 ', 'latin1')],
+        ['文本', Buffer.from('not an image')],
+        ['空', Buffer.alloc(0)],
+    ])('%s → 400 文案', (_name, buf) => {
+        expect(maskFormatError(buf)).toBe('Invalid mask image: mask must be a valid PNG file.');
     });
 });

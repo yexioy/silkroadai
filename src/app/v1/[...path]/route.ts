@@ -60,7 +60,7 @@ import {
     type PlaceholderSpec,
 } from '@/lib/image/stream-placeholder';
 import { newGenerationId } from '@/lib/image/generation-id';
-import { jsonMaskShapeError, maskDimensionError, multipartMaskShapeError } from '@/lib/image/mask';
+import { jsonMaskShapeError, maskDimensionError, maskFormatError, multipartMaskShapeError } from '@/lib/image/mask';
 import { resolveOutputBackground } from '@/lib/image/opacity';
 import { isSvgBytes } from '@/lib/image/transcode';
 import {
@@ -1425,8 +1425,11 @@ async function gptImageUpstream(
             // 蒙版尺寸必须与第一张输入图一致:上游会拒,但文案不在适配器终态白名单 → failover → 客户 503
             const maskFile = form.get('mask');
             if (maskFile instanceof Blob && maskFile.size > 0) {
+                const maskBytes = Buffer.from(await maskFile.arrayBuffer());
+                const fmtErr = maskFormatError(maskBytes);
+                if (fmtErr) throw new MaskImageError(fmtErr);
                 const dimErr = maskDimensionError(
-                    imageDimensions(Buffer.from(await maskFile.arrayBuffer())),
+                    imageDimensions(maskBytes),
                     imageDimensions(Buffer.from(await imageFiles[0].arrayBuffer())),
                 );
                 if (dimErr) throw new MaskImageError(dimErr);
@@ -1481,6 +1484,8 @@ async function gptImageUpstream(
         }
         if (!mask) throw new MaskImageError('mask: could not be resolved to an image');
         const maskBuf = Buffer.from(mask.data, 'base64');
+        const fmtErr = maskFormatError(maskBuf);
+        if (fmtErr) throw new MaskImageError(fmtErr);
         const dimErr = maskDimensionError(
             imageDimensions(maskBuf),
             imageDimensions(Buffer.from(imgs[0].data, 'base64')),
