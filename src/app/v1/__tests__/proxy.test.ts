@@ -5149,7 +5149,7 @@ describe('/v1 proxy — gpt-image 官方契约对齐(variations 拦 / 流参数�
         const form = new FormData();
         form.append('model', 'gpt-image-2');
         form.append('prompt', 'x');
-        form.append('mask', imageFile([1, 2, 3], 'mask.png'));
+        form.append('mask', imageFile([0x89, 0x50, 0x4e, 0x47], 'mask.png'));
         const res = await POST(makeMultipartReq(form), ctx('images', 'edits'));
         expect(res.status).toBe(400);
         expect(((await res.json()) as { error: { param: string } }).error.param).toBe('image');
@@ -5480,7 +5480,7 @@ describe('/v1 proxy — seedream-5-0-pro 钩子', () => {
         form.append('layer_decomposition', 'false');
         form.append('watermark', 'true');
         form.append('image', new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' }), 'a.png');
-        form.append('mask', new Blob([new Uint8Array([9])], { type: 'image/png' }), 'm.png');
+        form.append('mask', new Blob([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], { type: 'image/png' }), 'm.png');
         form.append('image_urls', 'https://a/ref.png');
         const req = new NextRequest('https://ai.silkroadai.io/v1/images/edits', { method: 'POST', body: form });
         const res = await POST(req, ctx('images', 'edits'));

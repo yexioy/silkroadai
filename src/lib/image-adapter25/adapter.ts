@@ -32,7 +32,7 @@ import { officialImageInputTokens } from '@/lib/tokens/image-input-tokens';
 import { stripAdobeImageMetadataB64 } from '@/lib/proxy/image-metadata';
 import { encodeQuality, transcodeB64, transcodeTargetOf } from '@/lib/image/transcode';
 import { newGenerationId } from '@/lib/image/generation-id';
-import { jsonMaskShapeError, maskDimensionError, multipartMaskShapeError } from '@/lib/image/mask';
+import { jsonMaskShapeError, maskDimensionError, maskFormatError, multipartMaskShapeError } from '@/lib/image/mask';
 import { resolveOutputBackground } from '@/lib/image/opacity';
 import { alignTo16, isAutoSize, officialAutoDims } from '@/lib/image-adapter/auto-size';
 import {
@@ -1000,6 +1000,13 @@ export async function handleAdapter25Image(
         });
     }
     // 蒙版尺寸必须与第一张输入图一致(官方约束;上游也拒,但前置拦截省一次上游往返)
+    if (parsed.mask) {
+        const fmtErr = maskFormatError(parsed.mask.buf);
+        if (fmtErr) {
+            console.warn('[image-adapter25] non-PNG mask rejected', { provider: providerName });
+            return terminalReject({ terminal: 'bad_request', detail: fmtErr, param: 'mask', code: 'invalid_image' });
+        }
+    }
     if (parsed.mask && parsed.images.length > 0) {
         const dimErr = maskDimensionError(imageDimensions(parsed.mask.buf), imageDimensions(parsed.images[0].buf));
         if (dimErr) {
@@ -1226,8 +1233,10 @@ export async function handleAdapter25Image(
 
     if (gifTarget) for (const it of items) it.b64_json = await resizeGifB64(it.b64_json, gifTarget);
     if (gifRetime) for (const it of items) it.b64_json = await retimeGifB64(it.b64_json, gifRetime);
-    // 上游多给了帧(校验只保证不少于请求)→ 均匀抽回请求帧数,帧时长保持请求值
-    else if (gifVerifyRetries && gifFrames) {
+    // 上游多给了帧 → 均匀抽回请求帧数,帧时长保持请求值。对所有上游生效(不看 verifyRetries):
+    // 2026-11-19 客户实测 we-token 2.6 线(无 gif 能力声明,帧参数原样透传)忽略 frame_count 恒交 9 帧,
+    // 而 usage 按请求帧数合成 → 交付与计费对不上。
+    else if (gifFrames) {
         const durationMs = parsed.extras.frame_duration_ms ? Number(parsed.extras.frame_duration_ms) : null;
         for (const it of items)
             if (gifFrameCountOf(Buffer.from(it.b64_json, 'base64')) > gifFrames)

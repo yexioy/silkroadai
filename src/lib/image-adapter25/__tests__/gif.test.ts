@@ -278,6 +278,15 @@ describe('适配器 GIF 全流程', () => {
         expect(await framesOf(j.data[0].b64_json)).toMatchObject({ pages: 4, w: 512, h: 512 });
     });
 
+    it('we-token 2.6(无 gif 能力声明)忽略 frame_count 交 9 帧 → 抽回请求的 2 帧(2026-11-19 客户反馈)', async () => {
+        upstreamReturns((await animatedGif(816, 9, 200)).toString('base64'));
+        const res = await post('wetokenasia26', 'gpt-image-2.6-flare', { frame_count: 2 });
+        expect(res.status).toBe(200);
+        expect(sent()).toMatchObject({ frame_count: 2 });
+        const j = (await res.json()) as { data: Array<{ b64_json: string }> };
+        expect(await framesOf(j.data[0].b64_json)).toMatchObject({ pages: 2, w: 512, h: 512 });
+    });
+
     it('缺省 size 按 512×512:上游收 816×816(不把 1024² 的 auto 发上游)', async () => {
         upstreamReturns((await animatedGif(816, 2, 200)).toString('base64'));
         const res = await post('wetokenasia26', 'gpt-image-2.6-flare', {});
