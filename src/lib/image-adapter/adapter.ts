@@ -24,6 +24,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { stripAdobeImageMetadataB64 } from '@/lib/proxy/image-metadata';
 import { encodeQuality, transcodeB64, transcodeTargetOf } from '@/lib/image/transcode';
 import { newGenerationId } from '@/lib/image/generation-id';
+import { addPartialUsage, takePartialFrames } from '@/lib/image/partial-billing';
 import { type AsyncTaskTransport, IMAGE_PROVIDERS, type ImageProvider } from './providers';
 import { countImagePromptTokens } from '@/lib/tokens/count-text-tokens';
 import { officialImageInputTokens } from '@/lib/tokens/image-input-tokens';
@@ -783,6 +784,8 @@ export async function handleAdapterImage(
 
     const parsed = await parseIncoming(req, mode);
     if (!parsed) return failover('bad_request_body', 'unparseable request body');
+    // 伪流式 partial 帧数(/v1 代理经 user 尾标记传来,见 @/lib/image/partial-billing):取出并还原 user,usage 合成后加收。
+    const partialFrames = takePartialFrames(parsed.extras);
 
     // ---- 透明背景路由(调上游之前,不花钱)----
     // `background:"transparent"` 只能交给验证过真出 alpha 的上游:不支持的上游会 200 返回
@@ -1047,6 +1050,7 @@ export async function handleAdapterImage(
         inputImageDims: parsed.images.map((img) => imageDimensions(img.buf)),
         imageCount: items.length,
     });
+    addPartialUsage(usage, partialFrames);
     // ---- output_format=jpeg / webp:服务端转码成真字节(客户 #9;第 5 批加 webp;dims/usage 已按原图算完)----
     const wantFormat = transcodeTargetOf(parsed.extras.output_format);
     if (wantFormat) {

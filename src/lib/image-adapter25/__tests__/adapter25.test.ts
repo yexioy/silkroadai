@@ -178,6 +178,40 @@ describe('handleAdapter25Image 透传契约', () => {
         expect(body.background).toBe('opaque');
     });
 
+    it('伪流式 partial 帧计费:user 尾标记 → 每帧 +100 output token,标记不发上游(客户原 user 保留 / 无则不带)', async () => {
+        for (const [user, sentUser] of [
+            ['cust-1;sr-partial=2', 'cust-1'],
+            [';sr-partial=2', undefined],
+        ] as const) {
+            fetchMock.mockClear();
+            okUpstream([pngB64(1024, 1024)]);
+            const res = await handleAdapter25Image(
+                jsonReq(URL_GEN, {
+                    model: 'gpt-image-2.5-flare',
+                    prompt: 'x',
+                    size: '1024x1024',
+                    quality: 'low',
+                    user,
+                }),
+                'generations',
+                'wetokenasia25',
+            );
+            const sent = JSON.parse(String((fetchMock.mock.calls[0] as [string, RequestInit])[1].body)) as Record<
+                string,
+                unknown
+            >;
+            expect(sent.user).toBe(sentUser);
+            const u = (
+                (await res.json()) as {
+                    usage: Record<string, number> & { output_tokens_details: Record<string, number> };
+                }
+            ).usage;
+            expect(u.output_tokens).toBe(196 + 200);
+            expect(u.output_tokens_details.image_tokens).toBe(196 + 200);
+            expect(u.total_tokens).toBe(u.input_tokens + 396);
+        }
+    });
+
     it('quality=auto 透传 auto 给上游、按 low 计费 196、回显 low', async () => {
         okUpstream([pngB64(1024, 1024)]);
         const res = await handleAdapter25Image(

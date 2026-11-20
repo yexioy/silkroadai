@@ -283,7 +283,7 @@ describe('/docs page — 第 13 章 gpt-image 流式返回(stream + partial_imag
             'image_edit.',
             '占位动图',
             'APNG',
-            '占位帧不计费',
+            '每帧按官方口径加收 100 output token',
         ])
             expect(html, s).toContain(s);
     });
