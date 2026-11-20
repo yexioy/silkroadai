@@ -6273,6 +6273,13 @@ describe('/v1 proxy — 伪流式 partial_image 事件 + sequence_number(第 5 �
         expect(events[1].data.partial_image_index).toBe(1);
         expect(events.map((e) => e.data.sequence_number)).toEqual([0, 1, 2]);
         expect(events[2].data.usage).toEqual({ input_tokens: 8, output_tokens: 196, total_tokens: 204 });
+        // 计费标记:实际发出的帧数经 user 尾标记交给适配器(partial_images / stream 仍不透传)
+        const sentJson = JSON.parse(String((mockFetch.mock.calls[0] as [string, RequestInit])[1].body)) as Record<
+            string,
+            unknown
+        >;
+        expect(sentJson.user).toBe(';sr-partial=2');
+        expect(sentJson.partial_images).toBeUndefined();
         // 占位帧 = 请求尺寸(1024²)的同一张图,不是最终图的缩放;completed 才是真图(64²)
         expect(events[0].data.b64_json).toBe(events[1].data.b64_json);
         expect(await pngDims(events[0].data.b64_json as string)).toEqual({ w: 1024, h: 1024 });
@@ -6356,6 +6363,53 @@ describe('/v1 proxy — 伪流式 partial_image 事件 + sequence_number(第 5 �
         expect(head.toString('latin1', 8, 12)).toBe('WEBP');
     });
 
+    it('计费标记只能由代理打:非流式请求里客户自带的 ;sr-partial= 被剥;流式时保留客户原 user 再追加', async () => {
+        mockFetch.mockResolvedValueOnce(
+            new Response(JSON.stringify({ created: 1, data: [{ b64_json: 'QUJD' }] }), {
+                status: 200,
+                headers: { 'content-type': 'application/json' },
+            }),
+        );
+        await POST(
+            makeReq('/images/generations', {
+                body: { model: 'gpt-image-2', prompt: 'x', size: '1024x1024', user: 'cust-1;sr-partial=3' },
+            }),
+            ctx('images', 'generations'),
+        );
+        const plain = JSON.parse(String((mockFetch.mock.calls[0] as [string, RequestInit])[1].body)) as Record<
+            string,
+            unknown
+        >;
+        expect(plain.user).toBe('cust-1');
+
+        mockFetch.mockClear();
+        mockFetch.mockResolvedValueOnce(
+            new Response(JSON.stringify({ created: 1, data: [{ b64_json: 'QUJD' }] }), {
+                status: 200,
+                headers: { 'content-type': 'application/json' },
+            }),
+        );
+        const res = await POST(
+            makeReq('/images/generations', {
+                body: {
+                    model: 'gpt-image-2',
+                    prompt: 'x',
+                    size: '1024x1024',
+                    stream: true,
+                    partial_images: 1,
+                    user: 'cust-1;sr-partial=3',
+                },
+            }),
+            ctx('images', 'generations'),
+        );
+        await res.text();
+        const streamed = JSON.parse(String((mockFetch.mock.calls[0] as [string, RequestInit])[1].body)) as Record<
+            string,
+            unknown
+        >;
+        expect(streamed.user).toBe('cust-1;sr-partial=1');
+    });
+
     it('partial_images 缺省 → 只有 completed(sequence_number 0);partial_images=5(超官方上限)→ 当 0', async () => {
         for (const extra of [{}, { partial_images: 5 }]) {
             mockFetch.mockResolvedValueOnce(
@@ -6402,6 +6456,7 @@ describe('/v1 proxy — 伪流式 partial_image 事件 + sequence_number(第 5 �
         expect(events[1].data.b64_json).toBe('QUJD');
         const [, init] = mockFetch.mock.calls[0] as [string, RequestInit];
         expect((init.body as FormData).get('partial_images')).toBeNull(); // 不透传上游
+        expect((init.body as FormData).get('user')).toBe(';sr-partial=1'); // 计费标记
     });
 
     it('非流式 generations:data[].generation_id 形态 UUID v4(官方实测),多张各不相同', async () => {

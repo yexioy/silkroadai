@@ -34,6 +34,7 @@ import { encodeQuality, transcodeB64, transcodeTargetOf } from '@/lib/image/tran
 import { newGenerationId } from '@/lib/image/generation-id';
 import { jsonMaskShapeError, maskDimensionError, maskFormatError, multipartMaskShapeError } from '@/lib/image/mask';
 import { resolveOutputBackground } from '@/lib/image/opacity';
+import { addPartialUsage, takePartialFrames } from '@/lib/image/partial-billing';
 import { alignTo16, isAutoSize, officialAutoDims } from '@/lib/image-adapter/auto-size';
 import {
     EDITS_GIF_MAX_FRAME_COUNT,
@@ -1025,6 +1026,8 @@ export async function handleAdapter25Image(
     }
 
     // ---- 2.6 专属字段(frame_count / frame_duration_ms / complexity):其余模型不发上游;校验失败终态 400 ----
+    // 伪流式 partial 帧数(/v1 代理经 user 尾标记传来,见 @/lib/image/partial-billing):取出并还原 user,usage 合成后加收。
+    const partialFrames = takePartialFrames(parsed.extras);
     const isGpt26 = (GPT_IMAGE_26_MODELS as ReadonlyArray<string>).includes(parsed.model);
     parsed = { ...parsed, extras: pruneGpt26Extras(parsed.extras, isGpt26) };
     if (isGpt26) {
@@ -1289,6 +1292,7 @@ export async function handleAdapter25Image(
         imageCount: items.length,
         gpt26: isGpt26 ? { gifFrames } : undefined,
     });
+    addPartialUsage(usage, partialFrames);
 
     // ---- output_format=jpeg / webp:官方原生支持已透传;上游未兑现(sniff 非目标格式)才服务端转码兜底(第 5 批加 webp)----
     if (wantFormat) {

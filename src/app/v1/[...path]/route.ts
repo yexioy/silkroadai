@@ -59,6 +59,7 @@ import {
     warmStreamPlaceholders,
     type PlaceholderSpec,
 } from '@/lib/image/stream-placeholder';
+import { stripPartialTag, tagPartialFrames } from '@/lib/image/partial-billing';
 import { newGenerationId } from '@/lib/image/generation-id';
 import { jsonMaskShapeError, maskDimensionError, maskFormatError, multipartMaskShapeError } from '@/lib/image/mask';
 import { resolveOutputBackground } from '@/lib/image/opacity';
@@ -1945,6 +1946,7 @@ function normalizeGptImageJson(body: JsonRecord): void {
     delete body.response_format;
     delete body.stream;
     delete body.partial_images;
+    if (typeof body.user === 'string') body.user = stripPartialTag(body.user); // 计费标记只能由代理打
     const vm = typeof body.model === 'string' ? gptImageVariant(body.model) : null;
     if (vm) {
         body.model = vm.base;
@@ -1966,6 +1968,8 @@ function normalizeGptImageForm(form: FormData): void {
     form.delete('response_format');
     form.delete('stream');
     form.delete('partial_images');
+    const user = form.get('user');
+    if (typeof user === 'string') form.set('user', stripPartialTag(user)); // 计费标记只能由代理打
     const vm = gptImageVariant(String(form.get('model') ?? ''));
     if (vm) {
         form.set('model', vm.base);
@@ -1990,7 +1994,9 @@ function normalizeGptImageForm(form: FormData): void {
 // completed 帧再给真图;生成期间每 15s 注 SSE 注释保活(CF ~100s 空闲掐线,慢图 300s+)。completed 字段对齐官方:
 // b64_json / created_at / size / quality / background / output_format / usage;`response_format=url` 扩展时带 url。
 // 失败 → 官方 error 事件(SSE 已开、状态码回不去了,与官方流中错误行为一致)。
-// 计费:partial 帧不计费(官方对每个 partial 帧多收 ~77 token,我们不收),usage 只在 completed 帧按非流式口径。
+// 计费(2026-11-20 起按官方口径):每个实际发出的 partial 帧 +100 image output token。代理把帧数经 user 尾标记
+// 传给适配器(@/lib/image/partial-billing),适配器加进 usage → new-api 计费、completed 帧回显同一份 usage。
+// 占位图做不出来(不发帧)就不打标记、不收;直连官 key 渠道不认标记,按上游真实 usage 计。
 
 const IMAGE_SSE_KEEPALIVE_MS = 15_000;
 
@@ -1998,6 +2004,21 @@ const IMAGE_SSE_KEEPALIVE_MS = 15_000;
 function parsePartialImages(v: unknown): number {
     const n = typeof v === 'number' ? v : Number(String(v ?? '').trim());
     return Number.isInteger(n) && n >= 0 && n <= 3 ? n : 0;
+}
+
+/** 伪流式开流前:占位图做得出来(= partial 帧一定会发)才给上游请求打计费标记。返回实际会发的帧数。 */
+async function markBilledPartialFrames(
+    form: FormData | null,
+    body: JsonRecord | null,
+    partialImages: number,
+    spec: PlaceholderSpec,
+): Promise<number> {
+    if (partialImages <= 0) return 0;
+    const b64 = await getStreamPlaceholderB64(spec).catch(() => null);
+    if (!b64) return 0;
+    if (form) form.set('user', tagPartialFrames(String(form.get('user') ?? ''), partialImages));
+    else if (body) body.user = tagPartialFrames(typeof body.user === 'string' ? body.user : '', partialImages);
+    return partialImages;
 }
 
 /** partial 占位帧回显的请求侧字段(与 completed 的 common 同形;真值要等上游返回才知道)。 */
@@ -2778,10 +2799,9 @@ async function handleImagesDalle(
                 // 伪流式:gpt-image + stream:true → 立即 200 开 SSE 保活,完成后发 completed 事件
                 if (wantStream && isGptImageModel(model)) {
                     warmStreamPlaceholders();
-                    return gptImageSseResponse(run(), path, partialImages, {
-                        spec: placeholderSpecFromRequest(sizeRaw, echo.outputFormat, echo.background),
-                        quality: echo.quality || null,
-                    });
+                    const spec = placeholderSpecFromRequest(sizeRaw, echo.outputFormat, echo.background);
+                    const frames = await markBilledPartialFrames(form, null, partialImages, spec);
+                    return gptImageSseResponse(run(), path, frames, { spec, quality: echo.quality || null });
                 }
                 return await run();
             }
@@ -2964,10 +2984,9 @@ async function handleImagesDalle(
                 // 伪流式:gpt-image + stream:true → 立即 200 开 SSE 保活,完成后发 completed 事件
                 if (wantStream && isGptImageModel(model)) {
                     warmStreamPlaceholders();
-                    return gptImageSseResponse(run(), path, partialImages, {
-                        spec: placeholderSpecFromRequest(sizeRaw, echo.outputFormat, echo.background),
-                        quality: echo.quality || null,
-                    });
+                    const spec = placeholderSpecFromRequest(sizeRaw, echo.outputFormat, echo.background);
+                    const frames = await markBilledPartialFrames(null, body, partialImages, spec);
+                    return gptImageSseResponse(run(), path, frames, { spec, quality: echo.quality || null });
                 }
                 return await run();
             }

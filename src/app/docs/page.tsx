@@ -1828,7 +1828,8 @@ curl ${OPENAI_BASE}/images/edits \\
                                     <td className="px-4 py-3 text-ink align-top">—</td>
                                     <td className="px-4 py-3 text-ink">
                                         0–3,仅 <code className="font-mono text-xs">stream: true</code> 时生效:开流即收到
-                                        N 帧 「生成中」占位动图,最终图在 completed 事件;占位帧不计费
+                                        N 帧 「生成中」占位动图,最终图在 completed 事件;每帧按官方口径加收 100 output
+                                        token
                                     </td>
                                 </tr>
                             </tbody>
@@ -2157,9 +2158,11 @@ with open("edited.png", "wb") as f:
                     </div>
                     <p className="m-0 mb-3 text-xs text-minor-ink leading-relaxed">
                         /images/edits 的事件名前缀为 <code className="font-mono text-xs">image_edit.</code>。流式只支持{' '}
-                        <code className="font-mono text-xs">n = 1</code>(n &gt; 1 返 400)。占位帧不计费,
-                        <code className="font-mono text-xs">usage</code>{' '}
-                        与非流式完全一致。不支持动图的查看器会显示占位图的第一帧。
+                        <code className="font-mono text-xs">n = 1</code>(n &gt; 1 返 400)。计费同官方:每个 partial
+                        帧加收 100 个 image output token(<code className="font-mono text-xs">partial_images: 2</code> 即{' '}
+                        <code className="font-mono text-xs">usage.output_tokens</code> 比非流式多 200);不传{' '}
+                        <code className="font-mono text-xs">partial_images</code>{' '}
+                        则与非流式完全一致。不支持动图的查看器会显示占位图的第一帧。
                     </p>
                     <CodeBlock language="bash">
                         {`curl -N ${OPENAI_BASE}/images/generations \\
