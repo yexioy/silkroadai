@@ -773,6 +773,23 @@ describe('单次输入上限(按变体,2026-08-07)', () => {
         expect(((await res.json()) as { error: { message: string } }).error.message).toMatch(/at most 10 audios/);
     });
 
+    it.each(['seedance2.5-global-720p-ref', 'seedance2.5-promax-720p-ref'])(
+        '海外 2.5(%s)同 30 图 / 10 视频上限:10 图不再被 9 图门误拒,31 图 → at most 30',
+        async (model) => {
+            let res = await submitVideo(
+                makeReq({ model, prompt: 'x', images: urls(30, 'img'), reference_videos: urls(10, 'vid') }),
+            );
+            if (res.status === 400)
+                expect(((await res.json()) as { error: { message: string } }).error.message).not.toMatch(/at most/);
+            res = await submitVideo(makeReq({ model, prompt: 'x', images: urls(31, 'img') }));
+            expect(res.status).toBe(400);
+            expect(((await res.json()) as { error: { message: string } }).error.message).toMatch(/at most 30 images/);
+            res = await submitVideo(makeReq({ model, prompt: 'x', reference_videos: urls(11, 'v') }));
+            expect(res.status).toBe(400);
+            expect(((await res.json()) as { error: { message: string } }).error.message).toMatch(/at most 10 videos/);
+        },
+    );
+
     it('旧档(pro)仍 9 图 / 3 视频上限,不被放开:pro -ref 10 图 → 400 at most 9 images', async () => {
         const res = await submitVideo(
             makeReq({ model: 'seedance2.0-pro-720p-ref', prompt: 'x', images: urls(10, 'img') }),
