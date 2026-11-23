@@ -479,7 +479,10 @@ print(j.get("video_url"), j.get("usage"))`}</Pre>
                                 <Td>
                                     <Code>images</Code>
                                 </Td>
-                                <Td>string[](≤9;seedance-2-5 ≤30;seedance-2-5-flash ≤10)</Td>
+                                <Td>
+                                    string[](≤9;seedance-2-5 / seedance-2-5-global / seedance-2-5-promax
+                                    ≤30;seedance-2-5-flash ≤10)
+                                </Td>
                                 <Td>参考图(多图参考/主体一致性);素材组 ID 会按序展开为组内全部图</Td>
                             </tr>
                             <tr>

@@ -210,11 +210,14 @@ export type SeedanceVariant =
     | 'promax-mini'
     | 'promax-2.5';
 
-/** 单次输入素材上限(按变体)。seedance 2.5(2026-08-07 上游放宽):30 图 + 10 视频 + 10 音频;
+/** 单次输入素材上限(按变体)。seedance 2.5 系(cn / global / proMax;2026-08-07 上游放宽):30 图 + 10 视频 + 10 音频;
  *  其余档沿用默认 9 图 / 3 视频 / 音频不限数(Infinity —— 保留旧行为,只需「音频需配图」约束)。
  *  上限比上游宽或等 —— 超限我们先 400 给清晰文案,不白打上游。 */
 const REF_LIMITS: Partial<Record<SeedanceVariant, { images: number; videos: number; audios: number }>> = {
     '2.5': { images: 30, videos: 10, audios: 10 },
+    // 海外 global / proMax 2.5 与国内 2.5 同代同能力。2026-11-23 前漏配 → 落回旧档 9 图 / 3 视频,
+    // 客户 seedance-2-5-global 传 10+ 图被我们自己 400「at most 9 images」误拒(未打上游)。
+    'promax-2.5': { images: 30, videos: 10, audios: 10 },
     '2.5-flash': { images: 10, videos: 5, audios: 5 },
 };
 /** 可「纯音频」提交的变体(火山官方:仅 Seedance 2.5 支持单独传入音频;2.0 系须配 ≥1 视频或图)。 */
@@ -776,7 +779,7 @@ export async function submitVideoWithKey(body: Record<string, unknown>, auth: st
             'invalid_request',
             'audio requires at least one reference video or image (reference_video / image / first_frame)',
         );
-    // 单次输入上限按变体(seedance 2.5 = 30 图 / 10 视频 / 10 音频;其余 9 图 / 3 视频 / 音频不限数)
+    // 单次输入上限按变体(seedance 2.5 系 = 30 图 / 10 视频 / 10 音频;其余 9 图 / 3 视频 / 音频不限数)
     const limits = refLimitsFor(map.variant);
     if (totalImages > limits.images) return err(400, 'invalid_request', `at most ${limits.images} images`);
     if (rawVideos.length > limits.videos) return err(400, 'invalid_request', `at most ${limits.videos} videos`);
