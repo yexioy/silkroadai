@@ -192,6 +192,48 @@ describe('gemini-adapter — handleGeminiAdapter', () => {
         expect(data.candidates).toHaveLength(1); // 图原样
     });
 
+    it('生图模型族 candidateCount>1 → 前置 400 INVALID_ARGUMENT,不打上游(官方不支持多候选)', async () => {
+        for (const gc of [{ candidateCount: 2 }, { candidate_count: 3 }]) {
+            const res = await handleGeminiAdapter(
+                req('gemini-nano-banana-2.1', 'generateContent', { ...TEXT_BODY, generationConfig: gc }),
+                'yobox',
+                'gemini-nano-banana-2.1',
+                'generateContent',
+            );
+            expect(res.status).toBe(400);
+            expect(res.headers.get('X-Silkroadai-Gemini-Adapter')).toBe('error');
+            expect(await res.json()).toEqual({
+                error: {
+                    code: 400,
+                    message: 'Multiple candidates is not enabled for this model',
+                    status: 'INVALID_ARGUMENT',
+                },
+            });
+        }
+        expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('candidateCount=1 照常出图;未知模型族 candidateCount=2 不拦(透传)', async () => {
+        mockFetch.mockResolvedValueOnce(upstreamResponse([[1024, 1024]]));
+        const one = await handleGeminiAdapter(
+            req('gemini-nano-banana-2.1', 'generateContent', { ...TEXT_BODY, generationConfig: { candidateCount: 1 } }),
+            'yobox',
+            'gemini-nano-banana-2.1',
+            'generateContent',
+        );
+        expect(one.status).toBe(200);
+        mockFetch.mockResolvedValueOnce(upstreamResponse([]));
+        const text = await handleGeminiAdapter(
+            req('gemini-3.8-flash', 'generateContent', { ...TEXT_BODY, generationConfig: { candidateCount: 2 } }),
+            'yobox',
+            'gemini-3.8-flash',
+            'generateContent',
+        );
+        expect(text.status).toBe(200);
+        expect(text.headers.get('X-Silkroadai-Gemini-Adapter')).toBe('passthrough');
+        expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
     it('按返回图实际像素分档:请求 4K 但上游只给 2048² → 按 2K 1680 计(不多收)', async () => {
         mockFetch.mockResolvedValueOnce(upstreamResponse([[2048, 2048]]));
         const body = { ...TEXT_BODY, generationConfig: { imageConfig: { imageSize: '4K' } } };
