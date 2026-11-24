@@ -2237,6 +2237,104 @@ export function gptImage26SvgError(p: Gpt26SvgParams): { message: string; param:
     return null;
 }
 
+interface Gpt26ExtraParams {
+    prompt: string;
+    outputFormat: unknown;
+    background: unknown;
+    hasFrameCount: boolean;
+    hasFrameDurationMs: boolean;
+    safetyIdentifier: unknown;
+    /** 原始 partial_images(JSON 值或 multipart 字符串);缺省 undefined / null。 */
+    partialImages: unknown;
+    stream: boolean;
+    hasMask: boolean;
+    hasMarkup: boolean;
+}
+const GPT_IMAGE_PROMPT_MAX_CHARS = 32_000;
+const SAFETY_IDENTIFIER_MAX_CHARS = 128;
+
+/** 2.6 入参里此前被静默吞掉、200 出图计费的非法组合(2026-11-21 客户 conformance 报告 F1 类,ch336 实测复现):
+ *  prompt 超 32000 字符、safety_identifier 超 128 字符、partial_images 越界 / 不带 stream、
+ *  帧参数配非 GIF 输出、透明背景配 jpeg、mask 与 markup 同传。都是换渠道也过不去的确定性错误 → 代理层 400,不打上游。
+ *  文案:partial_images 不带 stream 是官 key 实测原文(2026-11-20 ch325);长度 / 整数越界沿用官方通用模板;
+ *  其余三条官 key 渠道当时不可用、未取到原文,按既有文案风格写。只对 2.6 生效,2.0 / 2.5 行为不变。 */
+export function gptImage26ParamError(
+    p: Gpt26ExtraParams,
+): { message: string; param: string; code: string; type?: string } | null {
+    if (p.prompt.length > GPT_IMAGE_PROMPT_MAX_CHARS)
+        return {
+            message: `Invalid 'prompt': string too long. Expected a string with maximum length ${GPT_IMAGE_PROMPT_MAX_CHARS}, but got a string with length ${p.prompt.length} instead.`,
+            param: 'prompt',
+            code: 'string_above_max_length',
+        };
+    if (p.safetyIdentifier !== undefined && p.safetyIdentifier !== null) {
+        if (typeof p.safetyIdentifier !== 'string')
+            return {
+                message: `Invalid type for 'safety_identifier': expected a string, but got ${jsTypeName(p.safetyIdentifier)} instead.`,
+                param: 'safety_identifier',
+                code: 'invalid_type',
+            };
+        if (p.safetyIdentifier.length > SAFETY_IDENTIFIER_MAX_CHARS)
+            return {
+                message: `Invalid 'safety_identifier': string too long. Expected a string with maximum length ${SAFETY_IDENTIFIER_MAX_CHARS}, but got a string with length ${p.safetyIdentifier.length} instead.`,
+                param: 'safety_identifier',
+                code: 'string_above_max_length',
+            };
+    }
+    if (p.partialImages !== undefined && p.partialImages !== null && String(p.partialImages).trim() !== '') {
+        const raw = p.partialImages;
+        const v = typeof raw === 'number' ? raw : /^-?\d+$/.test(String(raw).trim()) ? Number(String(raw).trim()) : NaN;
+        if (!Number.isInteger(v))
+            return {
+                message: `Invalid type for 'partial_images': expected an integer, but got ${jsTypeName(raw)} instead.`,
+                param: 'partial_images',
+                code: 'invalid_type',
+            };
+        if (v < 0)
+            return {
+                message: `Invalid 'partial_images': integer below minimum value. Expected a value >= 0, but got ${v} instead.`,
+                param: 'partial_images',
+                code: 'integer_below_min_value',
+            };
+        if (v > 3)
+            return {
+                message: `Invalid 'partial_images': integer above maximum value. Expected a value <= 3, but got ${v} instead.`,
+                param: 'partial_images',
+                code: 'integer_above_max_value',
+            };
+        if (v > 0 && !p.stream)
+            return {
+                message: 'Partial images are only supported with streaming.',
+                param: 'partial_images',
+                code: 'invalid_value',
+            };
+    }
+    const of = typeof p.outputFormat === 'string' ? p.outputFormat.trim().toLowerCase() : '';
+    if (of !== 'gif') {
+        const frameParam = p.hasFrameCount ? 'frame_count' : p.hasFrameDurationMs ? 'frame_duration_ms' : null;
+        if (frameParam)
+            return {
+                message: `'${frameParam}' is only supported for GIF output. Set output_format to 'gif' or remove '${frameParam}'.`,
+                param: frameParam,
+                code: 'invalid_value',
+            };
+    }
+    const bg = typeof p.background === 'string' ? p.background.trim().toLowerCase() : '';
+    if (bg === 'transparent' && (of === 'jpeg' || of === 'jpg'))
+        return {
+            message: "Transparent background is not supported for output_format 'jpeg'. Use 'png', 'webp', or 'gif'.",
+            param: 'background',
+            code: 'invalid_value',
+        };
+    if (p.hasMask && p.hasMarkup)
+        return {
+            message: "Cannot use both 'mask' and 'markup' in the same request.",
+            param: 'markup',
+            code: 'invalid_value',
+        };
+    return null;
+}
+
 function isGptImage26Svg(model: string, outputFormat: string): boolean {
     return isGptImage26Model(model) && outputFormat.trim().toLowerCase() === 'svg';
 }
@@ -2372,6 +2470,8 @@ type ImageEchoFields = {
     /** true = gpt-image-2.5 系:quality 回显枚举扩成 5 档(low/medium/high/xhigh/max)。
      *  2.0 不设 → xhigh/max 仍归一 low(与 2.0 适配器计费口径一致)。 */
     tier5?: boolean;
+    /** 客户传的 safety_identifier(已过长度校验)→ 响应顶层原样回显(官方 2.6 响应带此字段;适配器线上游不带)。 */
+    safetyIdentifier?: string;
 };
 
 /** 非 Gemini 图片模型(gpt-image-2 等)透传 + 响应整形:
@@ -2571,6 +2671,7 @@ async function reshapeOpenAiImageResponse(
         if (bg) out.background = upstreamBg || (actualBackground ?? bg);
         const of = deliveredFormat || normalizeEchoOutputFormat(echo.outputFormat, echo.gptDefaults);
         if (of) out.output_format = of;
+        if (echo.safetyIdentifier && out.safety_identifier === undefined) out.safety_identifier = echo.safetyIdentifier;
     }
 
     // opt-in(response_format:url):把 b64_json 存客户 OSS→平台 R2,响应改回 url(镜像 Gemini 生图)。
@@ -2704,6 +2805,22 @@ async function handleImagesDalle(
                         cap,
                     );
                     if (pErr) return pErr;
+                    if (isGptImage26Model(model)) {
+                        const sid = form.get('safety_identifier');
+                        const e26 = gptImage26ParamError({
+                            prompt: typeof promptField === 'string' ? promptField : '',
+                            outputFormat: form.get('output_format') ?? undefined,
+                            background: form.get('background') ?? undefined,
+                            hasFrameCount: String(form.get('frame_count') ?? '').trim() !== '',
+                            hasFrameDurationMs: String(form.get('frame_duration_ms') ?? '').trim() !== '',
+                            safetyIdentifier: typeof sid === 'string' ? sid : undefined,
+                            partialImages: form.get('partial_images') ?? undefined,
+                            stream: wantStream,
+                            hasMask: form.has('mask'),
+                            hasMarkup: form.has('markup'),
+                        });
+                        if (e26) return imageError(e26.message, 400, cap, { param: e26.param, code: e26.code });
+                    }
                     // 伪流式限 n=1(completed 事件按官方单图形;多图流式官方也没有稳定语义)
                     const nVal = String(form.get('n') ?? '').trim();
                     if (wantStream && nVal !== '' && Number(nVal) > 1)
@@ -2754,6 +2871,9 @@ async function handleImagesDalle(
                     outputFormat: String(form.get('output_format') ?? ''),
                     gptDefaults: isGptImageModel(model),
                     tier5: isGptImage25Model(model),
+                    safetyIdentifier: isGptImage26Model(model)
+                        ? String(form.get('safety_identifier') ?? '') || undefined
+                        : undefined,
                 };
                 const run = async (): Promise<NextResponse> => {
                     try {
@@ -2894,6 +3014,21 @@ async function handleImagesDalle(
                         cap,
                     );
                     if (pErr) return pErr;
+                    if (isGptImage26Model(model)) {
+                        const e26 = gptImage26ParamError({
+                            prompt: typeof body.prompt === 'string' ? body.prompt : '',
+                            outputFormat: body.output_format,
+                            background: body.background,
+                            hasFrameCount: body.frame_count !== undefined && body.frame_count !== null,
+                            hasFrameDurationMs: body.frame_duration_ms !== undefined && body.frame_duration_ms !== null,
+                            safetyIdentifier: body.safety_identifier,
+                            partialImages: body.partial_images,
+                            stream: wantStream,
+                            hasMask: body.mask !== undefined && body.mask !== null,
+                            hasMarkup: body.markup !== undefined && body.markup !== null,
+                        });
+                        if (e26) return imageError(e26.message, 400, cap, { param: e26.param, code: e26.code });
+                    }
                     // 伪流式限 n=1(completed 事件按官方单图形)
                     if (wantStream && body.n != null && Number(body.n) > 1)
                         return imageError('stream supports n=1 only', 400, cap, { code: 'invalid_value', param: 'n' });
@@ -2938,6 +3073,10 @@ async function handleImagesDalle(
                     gptDefaults: isGptImageModel(model),
                     recognized: seedream,
                     tier5: isGptImage25Model(model),
+                    safetyIdentifier:
+                        isGptImage26Model(model) && typeof body.safety_identifier === 'string'
+                            ? body.safety_identifier || undefined
+                            : undefined,
                 };
                 const run = async (): Promise<NextResponse> => {
                     try {

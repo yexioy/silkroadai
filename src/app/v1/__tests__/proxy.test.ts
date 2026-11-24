@@ -5660,6 +5660,104 @@ describe('/v1 proxy — gpt-image 官方尺寸约束默认生效 + /images/edits
         expect(mockFetch).not.toHaveBeenCalled();
     });
 
+    describe('2.6 非法入参前置 400(2026-11-21 客户 conformance 报告:此前 200 出图计费)', () => {
+        const m26 = { model: 'gpt-image-2.6-flare' };
+        it.each([
+            ['prompt 32001 字符', { prompt: 'a'.repeat(32001) }, 'prompt', 'string_above_max_length'],
+            [
+                'safety_identifier 129 字符',
+                { safety_identifier: 's'.repeat(129) },
+                'safety_identifier',
+                'string_above_max_length',
+            ],
+            ['safety_identifier 非字符串', { safety_identifier: 123 }, 'safety_identifier', 'invalid_type'],
+            ['partial_images=4', { stream: true, partial_images: 4 }, 'partial_images', 'integer_above_max_value'],
+            ['partial_images=-1', { stream: true, partial_images: -1 }, 'partial_images', 'integer_below_min_value'],
+            ['partial_images 不带 stream', { partial_images: 1 }, 'partial_images', 'invalid_value'],
+            ['png + frame_count', { output_format: 'png', frame_count: 4 }, 'frame_count', 'invalid_value'],
+            ['缺省格式 + frame_duration_ms', { frame_duration_ms: 100 }, 'frame_duration_ms', 'invalid_value'],
+            ['jpeg + transparent', { output_format: 'jpeg', background: 'transparent' }, 'background', 'invalid_value'],
+            [
+                'svg + partial_images',
+                { output_format: 'svg', svg: { model: 'gpt-5.5' }, partial_images: 1 },
+                'partial_images',
+                'invalid_value',
+            ],
+        ])('%s → 400,不打上游', async (_name, extra, param, code) => {
+            const res = await POST(gen({ ...m26, ...extra }), ctx('images', 'generations'));
+            expect(res.status).toBe(400);
+            const j = (await res.json()) as { error: { type: string; param: string; code: string } };
+            expect(j.error).toMatchObject({ type: 'invalid_request_error', param, code });
+            expect(mockFetch).not.toHaveBeenCalled();
+        });
+
+        it('partial_images 不带 stream 用官方实测原文', async () => {
+            const res = await POST(gen({ ...m26, partial_images: 2 }), ctx('images', 'generations'));
+            expect(((await res.json()) as { error: { message: string } }).error.message).toBe(
+                'Partial images are only supported with streaming.',
+            );
+        });
+
+        it.each([
+            ['prompt 恰 32000 字符', { prompt: 'a'.repeat(32000) }],
+            ['safety_identifier 恰 128 字符', { safety_identifier: 's'.repeat(128) }],
+            ['partial_images=0 不带 stream', { partial_images: 0 }],
+            ['gif + frame_count', { output_format: 'gif', frame_count: 4 }],
+            ['png + transparent', { output_format: 'png', background: 'transparent' }],
+        ])('边界合法值 %s → 放行', async (_name, extra) => {
+            const res = await POST(gen({ ...m26, ...extra }), ctx('images', 'generations'));
+            expect(res.status).toBe(200);
+            expect(mockFetch).toHaveBeenCalled();
+        });
+
+        it('multipart edits:mask 与 markup 同传 → 400 param=markup', async () => {
+            const png = new Blob([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])], {
+                type: 'image/png',
+            });
+            const fd = new FormData();
+            fd.append('model', 'gpt-image-2.6-sunburst');
+            fd.append('prompt', 'x');
+            fd.append('image', png, 'a.png');
+            fd.append('markup', png, 'k.png');
+            fd.append('mask', png, 'm.png');
+            const req = new NextRequest('https://ai.silkroadai.io/v1/images/edits', { method: 'POST', body: fd });
+            const bad = await POST(req, ctx('images', 'edits'));
+            expect(bad.status).toBe(400);
+            expect(((await bad.json()) as { error: { param: string } }).error.param).toBe('markup');
+            expect(mockFetch).not.toHaveBeenCalled();
+        });
+
+        it('multipart:frame_count 配 png → 400', async () => {
+            const fd = new FormData();
+            fd.append('model', 'gpt-image-2.6-flare');
+            fd.append('prompt', 'x');
+            fd.append('output_format', 'png');
+            fd.append('frame_count', '4');
+            const req = new NextRequest('https://ai.silkroadai.io/v1/images/generations', { method: 'POST', body: fd });
+            const res = await POST(req, ctx('images', 'generations'));
+            expect(res.status).toBe(400);
+            expect(((await res.json()) as { error: { param: string } }).error.param).toBe('frame_count');
+        });
+
+        it('响应顶层回显 safety_identifier(与 user 同传时取 safety_identifier);没传不加', async () => {
+            const res = await POST(
+                gen({ ...m26, safety_identifier: 'sid-abc', user: 'user-xyz' }),
+                ctx('images', 'generations'),
+            );
+            expect(((await res.json()) as { safety_identifier?: string }).safety_identifier).toBe('sid-abc');
+            const plain = await POST(gen({ ...m26, user: 'user-xyz' }), ctx('images', 'generations'));
+            expect((await plain.json()) as Record<string, unknown>).not.toHaveProperty('safety_identifier');
+        });
+
+        it.each(['gpt-image-2', 'gpt-image-2.5-flare'])('只对 2.6 生效:%s 同样的入参照旧放行', async (model) => {
+            const res = await POST(
+                gen({ model, partial_images: 1, safety_identifier: 's'.repeat(129) }),
+                ctx('images', 'generations'),
+            );
+            expect(res.status).toBe(200);
+        });
+    });
+
     describe('2.6 SVG', () => {
         const svgText = '<svg viewBox="0 0 8 8" xmlns="http://www.w3.org/2000/svg"></svg>';
         const svgReq = { model: 'gpt-image-2.6-sunburst', output_format: 'svg', svg: { model: 'gpt-5.5' } };
