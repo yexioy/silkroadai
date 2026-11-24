@@ -14,6 +14,8 @@
  *    无图 → IMAGE 0(没交付不收图钱,也堵住「流式回空图仍计费」)。未知模型 → 原样透传不重写。
  * 4. `:streamGenerateContent`:上游走非流式 `:generateContent`(yobox 流式回空图),重写后包成
  *    单条 `data: {...}` SSE 回给 new-api。
+ * 4b. 已知生图模型族 + `candidateCount > 1` → 前置 400(对齐官方「Multiple candidates is not enabled
+ *    for this model」),不打上游。
  * 5. 上游非 2xx → 原状态码 + 脱敏 body 透传(new-api 自己决定 failover);连不上 / 超时 → 503。
  *
  * 官方表(ai.google.dev pricing + image-generation 文档 2026-10-22 实读,所有比例同一常数):
@@ -76,6 +78,15 @@ export function requestedTier(body: unknown): ImageTier {
     if (s === '2K') return '2K';
     if (s === '4K') return '4K';
     return '1K';
+}
+
+/** 请求里的 generationConfig.candidateCount(兼容 snake_case);缺省 / 非数字 → 1。 */
+export function requestedCandidateCount(body: unknown): number {
+    const gc =
+        (body as { generationConfig?: Record<string, unknown>; generation_config?: Record<string, unknown> })
+            ?.generationConfig ?? (body as { generation_config?: Record<string, unknown> })?.generation_config;
+    const n = Number(gc?.candidateCount ?? gc?.candidate_count ?? 1);
+    return Number.isFinite(n) ? n : 1;
 }
 
 export function officialOutputTokens(family: string, tier: ImageTier): number {
@@ -209,6 +220,13 @@ export async function handleGeminiAdapter(
     const fallbackTier = requestedTier(body);
     const inputImages = countInputImages(body);
     const t0 = Date.now();
+
+    // 生图模型族官方不支持多候选:Google 对 candidateCount>1 直接回 400。部分池子上游(yobox)会静默
+    // 吞掉参数、回 200 + 1 个 candidate —— 客户以为要了 2 张只拿到 1 张。这里对齐官方前置 400,
+    // 不打上游、不扣费。未知模型族(文本等)不拦,原样透传。
+    if (family && requestedCandidateCount(body) > 1) {
+        return errorJson(400, 'Multiple candidates is not enabled for this model', 'INVALID_ARGUMENT');
+    }
 
     // 上游永远走非流式(yobox :streamGenerateContent 回空图;单图请求也没有增量可言)
     const url = `${provider.baseUrl}/v1beta/models/${encodeURIComponent(model)}:generateContent`;
