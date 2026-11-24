@@ -26,6 +26,7 @@ const VENDOR_TOKENS = [
     'dreamina',
     'aiopenapi',
     'kuaizi',
+    'millu',
     'service-inference',
     'byteplus',
     'volcengine',

@@ -16,6 +16,7 @@ import 'server-only';
 import { toUpstreamTask } from '@/lib/enterprise/volc-id-map';
 import { fetchSvcinfArkTaskId, isSvcinfTaskId, type SvcinfConfig } from './svcinf-client';
 import { fetchKuaiziVendorTaskId, isKuaiziTaskId, type KuaiziConfig } from './kuaizi-adapter';
+import { isMilluMappedId, fromMilluMappedId } from './millu-adapter';
 
 export class DraftTaskError extends Error {}
 
@@ -130,4 +131,25 @@ export async function resolveDraftTaskArkIdKuaizi(
         return { ok: false, status: 502, code: 'upstream_error', message: '样片任务缺少上游任务号,无法出正片' };
     }
     return { ok: true, arkId: r.arkId };
+}
+
+/**
+ * millu 线的同一件事(2026-11-25):millu 的受理号本身就是方舟真号(cgt-),映射表里存的是带线标的
+ * `millu:cgt-…`,剥掉线标即可,不必再打上游(归属 / 完成态 proxy 已按库行校验过)。
+ * 建在别家线上的样片(kz-cgt- / mvt-)方舟侧账号不同、任务不互通 → 400 指引重出样片。
+ */
+export async function resolveDraftTaskArkIdMillu(clientDraftId: string): Promise<DraftTaskResolve> {
+    const { upstreamId } = await toUpstreamTask(clientDraftId);
+    if (!isMilluMappedId(upstreamId)) {
+        return {
+            ok: false,
+            status: 400,
+            code: 'invalid_request',
+            message:
+                isSvcinfTaskId(upstreamId) || isKuaiziTaskId(upstreamId)
+                    ? `样片任务 ${clientDraftId} 建在上一代渠道线上,当前线无法据此出正片 —— 请重新生成样片(draft:true)后再出正片`
+                    : `draft_task.id ${clientDraftId} 不是可出正片的样片任务(需 doubao-seedance-2-5 且 draft:true 生成)`,
+        };
+    }
+    return { ok: true, arkId: fromMilluMappedId(upstreamId) };
 }
