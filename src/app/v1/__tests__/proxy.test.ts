@@ -5758,6 +5758,59 @@ describe('/v1 proxy — gpt-image 官方尺寸约束默认生效 + /images/edits
         });
     });
 
+    describe('2.5 透明背景配 jpeg 前置 400(2026-11-25 客户「出图没有 c2pa」:此前转码成黑底 jpeg 丢 C2PA 照常计费)', () => {
+        it.each([
+            ['gpt-image-2.5-flare', 'jpeg'],
+            ['gpt-image-2.5-sunburst', 'jpg'],
+            ['gpt-image-2.5-flare', ' JPEG '],
+        ])('%s output_format=%s + transparent → 400,不打上游', async (model, output_format) => {
+            const res = await POST(
+                gen({ model, output_format, background: 'transparent' }),
+                ctx('images', 'generations'),
+            );
+            expect(res.status).toBe(400);
+            const j = (await res.json()) as { error: { type: string; param: string; code: string } };
+            expect(j.error).toMatchObject({
+                type: 'invalid_request_error',
+                param: 'background',
+                code: 'invalid_value',
+            });
+            expect(mockFetch).not.toHaveBeenCalled();
+        });
+
+        it('multipart 同样拦', async () => {
+            const fd = new FormData();
+            fd.append('model', 'gpt-image-2.5-flare');
+            fd.append('prompt', 'x');
+            fd.append('output_format', 'jpeg');
+            fd.append('background', 'transparent');
+            const req = new NextRequest('https://ai.silkroadai.io/v1/images/generations', { method: 'POST', body: fd });
+            const res = await POST(req, ctx('images', 'generations'));
+            expect(res.status).toBe(400);
+            expect(((await res.json()) as { error: { param: string } }).error.param).toBe('background');
+            expect(mockFetch).not.toHaveBeenCalled();
+        });
+
+        it.each([
+            ['png + transparent', { output_format: 'png', background: 'transparent' }],
+            ['webp + transparent', { output_format: 'webp', background: 'transparent' }],
+            ['jpeg + opaque', { output_format: 'jpeg', background: 'opaque' }],
+            ['jpeg 不带 background', { output_format: 'jpeg' }],
+        ])('合法组合 %s → 放行', async (_name, extra) => {
+            const res = await POST(gen({ model: 'gpt-image-2.5-flare', ...extra }), ctx('images', 'generations'));
+            expect(res.status).toBe(200);
+            expect(mockFetch).toHaveBeenCalled();
+        });
+
+        it('gpt-image-2(2.0)行为不变', async () => {
+            const res = await POST(
+                gen({ model: 'gpt-image-2', output_format: 'jpeg', background: 'transparent' }),
+                ctx('images', 'generations'),
+            );
+            expect(res.status).toBe(200);
+        });
+    });
+
     describe('2.6 SVG', () => {
         const svgText = '<svg viewBox="0 0 8 8" xmlns="http://www.w3.org/2000/svg"></svg>';
         const svgReq = { model: 'gpt-image-2.6-sunburst', output_format: 'svg', svg: { model: 'gpt-5.5' } };

@@ -2253,11 +2253,28 @@ interface Gpt26ExtraParams {
 const GPT_IMAGE_PROMPT_MAX_CHARS = 32_000;
 const SAFETY_IDENTIFIER_MAX_CHARS = 128;
 
+/** 透明背景配 jpeg:jpeg 无 alpha,官方 400。2.5 此前没拦 —— 上游兑现透明返 RGBA PNG、适配器再转码成 jpeg,
+ *  交付黑底不透明图且重编码丢掉 OpenAI C2PA,照常计费(2026-11-25 客户「出图没有 c2pa」)。2.5 / 2.6 共用。 */
+export function gptImageTransparentJpegError(
+    background: unknown,
+    outputFormat: unknown,
+): { message: string; param: string; code: string } | null {
+    const bg = typeof background === 'string' ? background.trim().toLowerCase() : '';
+    const of = typeof outputFormat === 'string' ? outputFormat.trim().toLowerCase() : '';
+    if (bg === 'transparent' && (of === 'jpeg' || of === 'jpg'))
+        return {
+            message: "Transparent background is not supported for output_format 'jpeg'. Use 'png', 'webp', or 'gif'.",
+            param: 'background',
+            code: 'invalid_value',
+        };
+    return null;
+}
+
 /** 2.6 入参里此前被静默吞掉、200 出图计费的非法组合(2026-11-21 客户 conformance 报告 F1 类,ch336 实测复现):
  *  prompt 超 32000 字符、safety_identifier 超 128 字符、partial_images 越界 / 不带 stream、
  *  帧参数配非 GIF 输出、透明背景配 jpeg、mask 与 markup 同传。都是换渠道也过不去的确定性错误 → 代理层 400,不打上游。
  *  文案:partial_images 不带 stream 是官 key 实测原文(2026-11-20 ch325);长度 / 整数越界沿用官方通用模板;
- *  其余三条官 key 渠道当时不可用、未取到原文,按既有文案风格写。只对 2.6 生效,2.0 / 2.5 行为不变。 */
+ *  其余三条官 key 渠道当时不可用、未取到原文,按既有文案风格写。只对 2.6 生效;透明配 jpeg 一条 2.5 也拦(见上)。 */
 export function gptImage26ParamError(
     p: Gpt26ExtraParams,
 ): { message: string; param: string; code: string; type?: string } | null {
@@ -2319,13 +2336,8 @@ export function gptImage26ParamError(
                 code: 'invalid_value',
             };
     }
-    const bg = typeof p.background === 'string' ? p.background.trim().toLowerCase() : '';
-    if (bg === 'transparent' && (of === 'jpeg' || of === 'jpg'))
-        return {
-            message: "Transparent background is not supported for output_format 'jpeg'. Use 'png', 'webp', or 'gif'.",
-            param: 'background',
-            code: 'invalid_value',
-        };
+    const tj = gptImageTransparentJpegError(p.background, p.outputFormat);
+    if (tj) return tj;
     if (p.hasMask && p.hasMarkup)
         return {
             message: "Cannot use both 'mask' and 'markup' in the same request.",
@@ -2820,6 +2832,9 @@ async function handleImagesDalle(
                             hasMarkup: form.has('markup'),
                         });
                         if (e26) return imageError(e26.message, 400, cap, { param: e26.param, code: e26.code });
+                    } else if (isGptImage25Model(model)) {
+                        const tj = gptImageTransparentJpegError(form.get('background'), form.get('output_format'));
+                        if (tj) return imageError(tj.message, 400, cap, { param: tj.param, code: tj.code });
                     }
                     // 伪流式限 n=1(completed 事件按官方单图形;多图流式官方也没有稳定语义)
                     const nVal = String(form.get('n') ?? '').trim();
@@ -3028,6 +3043,9 @@ async function handleImagesDalle(
                             hasMarkup: body.markup !== undefined && body.markup !== null,
                         });
                         if (e26) return imageError(e26.message, 400, cap, { param: e26.param, code: e26.code });
+                    } else if (isGptImage25Model(model)) {
+                        const tj = gptImageTransparentJpegError(body.background, body.output_format);
+                        if (tj) return imageError(tj.message, 400, cap, { param: tj.param, code: tj.code });
                     }
                     // 伪流式限 n=1(completed 事件按官方单图形)
                     if (wantStream && body.n != null && Number(body.n) > 1)
