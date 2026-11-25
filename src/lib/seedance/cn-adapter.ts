@@ -308,9 +308,10 @@ export const MODEL_MAP: Record<string, SeedanceModelSpec> = {
         ),
     ),
     // ── 海外版(global)seedance 2.5(2026-08-31):variant 复用 promax-2.5(费率同价、单一价源);
-    //    2026-10-17 起上游 = service-inference.ai(有 key 才切,否则回落 artsmcp intl),480p 随之开放 ──
+    //    2026-10-17 起上游 = service-inference.ai(有 key 才切,否则回落 artsmcp intl),480p 随之开放;
+    //    2026-11-25 上游 dreamina 2.5 开 4k → global 2.5 跟开(proMax 2.5 走 artsmcp intl,仍无 4k)──
     ...Object.fromEntries(
-        (['480p', '720p', '1080p'] as const).flatMap((resolution) =>
+        (['480p', '720p', '1080p', '4k'] as const).flatMap((resolution) =>
             [false, true].map((ref) => [
                 `seedance2.5-global-${resolution}${ref ? '-ref' : ''}`,
                 {

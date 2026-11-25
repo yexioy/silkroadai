@@ -247,12 +247,12 @@ print(j.get("video_url"), j.get("usage"))`}</Pre>
                         <b>如果生成因敏感内容被审核拒绝(fail_reason 提示 sensitive),并非开白/权限原因,请尝试海外版。</b>
                     </p>
                     <p className="mt-1 text-indigo-900">
-                        ⚠️ <Code>seedance-2-5-global</Code> 支持 480p / 720p / 1080p,
+                        ⚠️ <Code>seedance-2-5-global</Code> 支持 480p / 720p / 1080p / 4k(4k 2026-11-25 开档),
                         <b>
-                            费率与下方 proMax 的 <Code>seedance-2-5-promax</Code> 相同
+                            480p / 720p / 1080p 费率与下方 proMax 的 <Code>seedance-2-5-promax</Code> 相同
                         </b>
-                        ({listPrices('promax-2.5', ['480p', '720p', '1080p'], false)}
-                        ;含视频输入 {listPrices('promax-2.5', ['480p', '720p', '1080p'], true)}),
+                        ({listPrices('promax-2.5', ['480p', '720p', '1080p', '4k'], false)}
+                        ;含视频输入 {listPrices('promax-2.5', ['480p', '720p', '1080p', '4k'], true)}),
                         <b>不同于国内版 seedance-2-5</b> —— 下单前请留意。
                     </p>
                 </div>
@@ -355,8 +355,8 @@ print(j.get("video_url"), j.get("usage"))`}</Pre>
                                 <Td>string</Td>
                                 <Td>否</Td>
                                 <Td>
-                                    480p / 720p(默认)/ 1080p / 4k(4k 仅 seedance-2-0 与 seedance-2-5;seedance-2-5-flash
-                                    仅 480p / 720p;480p 与 720p 同费率)
+                                    480p / 720p(默认)/ 1080p / 4k(4k 仅 seedance-2-0 / seedance-2-5 及其 global
+                                    版;seedance-2-5-flash 仅 480p / 720p;480p 与 720p 同费率)
                                 </Td>
                             </tr>
                             <tr>
