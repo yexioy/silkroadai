@@ -29,18 +29,32 @@ describe('runGroupRatioReconcile', () => {
         },
     );
 
-    it('repaired → warning 告警带明细', async () => {
-        const result = { status: 'repaired', groups: 28, missing: { GroupRatio: ['x'] } };
+    it('synced → info 留痕带明细', async () => {
+        const result = {
+            status: 'synced',
+            groups: 28,
+            diff: { added: ['x'], removed: [], changed: [] },
+            heldRemovals: [],
+        };
         mockReconcile.mockResolvedValue(result);
         await runGroupRatioReconcile();
-        expect(mockCapture).toHaveBeenCalledWith('group ratio keys repaired', {
-            level: 'warning',
-            extra: { result },
-        });
+        expect(mockCapture).toHaveBeenCalledWith('group ratio keys synced', { level: 'info', extra: { result } });
+    });
+
+    it('synced 但有挂起的批量删除 → error 告警', async () => {
+        const result = {
+            status: 'synced',
+            groups: 28,
+            diff: { added: [], removed: [], changed: [] },
+            heldRemovals: ['a', 'b', 'c', 'd'],
+        };
+        mockReconcile.mockResolvedValue(result);
+        await runGroupRatioReconcile();
+        expect(mockCapture).toHaveBeenCalledWith('group ratio removals held', { level: 'error', extra: { result } });
     });
 
     it.each([
-        [{ status: 'conflict', conflicts: [{ group: 'a', values: {} }] }],
+        [{ status: 'removals_held', heldRemovals: ['a', 'b', 'c', 'd'] }],
         [{ status: 'invalid', problems: ['GroupRatio 缺失'] }],
         [{ status: 'write_failed', written: [], error: 'x' }],
         [{ status: 'verify_failed', detail: 'x' }],

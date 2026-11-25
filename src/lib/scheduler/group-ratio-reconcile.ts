@@ -2,10 +2,10 @@ import * as Sentry from '@sentry/nextjs';
 import { reconcileGroupRatioKeys, type GroupRatioReconcileResult } from '@/lib/newapi/group-ratio-reconcile';
 
 /**
- * 分组倍率三键对账(2026-11-06)。每小时比对 new-api 三个 GroupRatio option,兜住后台 UI 新建分组
- * 只写 legacy 键导致的"新组不生效"。何时写、何时只告警见 lib/newapi/group-ratio-reconcile.ts。
+ * 分组倍率三键同步(2026-11-25)。每分钟把后台 UI 写的 `GroupRatio` 复制到另外两个 option 键,
+ * 让 UI 上的改 / 删 / 建在一分钟内真正生效。规则与保险见 lib/newapi/group-ratio-reconcile.ts。
  */
-const INTERVAL_MS = 60 * 60 * 1_000;
+const INTERVAL_MS = 60 * 1_000;
 let timer: ReturnType<typeof setInterval> | null = null;
 let running = false;
 
@@ -16,17 +16,20 @@ export async function runGroupRatioReconcile(): Promise<GroupRatioReconcileResul
         const result = await reconcileGroupRatioKeys();
         switch (result.status) {
             case 'in_sync':
-                console.log(`[group-ratio-reconcile] ok: ${result.groups} groups in sync`);
-                break;
+                break; // 每分钟一次,一致时不刷日志
             case 'deferred':
-                console.log(`[group-ratio-reconcile] deferred to next tick: ${result.reason}`);
+                console.log(`[group-ratio-sync] deferred to next tick: ${result.reason}`);
                 break;
-            case 'repaired':
-                console.warn('[group-ratio-reconcile] repaired', JSON.stringify(result));
-                Sentry.captureMessage('group ratio keys repaired', { level: 'warning', extra: { result } });
+            case 'synced':
+                console.warn('[group-ratio-sync] synced from GroupRatio', JSON.stringify(result));
+                if (result.heldRemovals.length > 0) {
+                    Sentry.captureMessage('group ratio removals held', { level: 'error', extra: { result } });
+                } else {
+                    Sentry.captureMessage('group ratio keys synced', { level: 'info', extra: { result } });
+                }
                 break;
             default:
-                console.error('[group-ratio-reconcile] needs attention', JSON.stringify(result));
+                console.error('[group-ratio-sync] needs attention', JSON.stringify(result));
                 Sentry.captureMessage(`group ratio keys ${result.status}`, { level: 'error', extra: { result } });
         }
         return result;
@@ -39,11 +42,10 @@ export function startGroupRatioReconcileScheduler(): void {
     if (timer) return;
     const tick = () =>
         runGroupRatioReconcile().catch((err) => {
-            console.error('[group-ratio-reconcile] pass failed:', err);
-            Sentry.captureException(err, { tags: { area: 'group-ratio-reconcile' } });
+            console.error('[group-ratio-sync] pass failed:', err);
+            Sentry.captureException(err, { tags: { area: 'group-ratio-sync' } });
         });
-    // 启动后 2 分钟首跑(让 new-api 连通稳定),之后每小时
-    setTimeout(tick, 2 * 60 * 1_000);
+    // 启动后 1 分钟首跑(让 new-api 连通稳定),之后每分钟
     timer = setInterval(tick, INTERVAL_MS);
 }
 
