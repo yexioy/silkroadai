@@ -61,6 +61,7 @@ const REQUIRES_GUARD = [
 
     'customer-ratio.ts', // 2026-10-25 专属倍率写路径:矩阵两键同写 + PUT 用户分组
     'group-ratio-reconcile.ts', // 2026-11-25 分组倍率三键同步(UI 为准):读写 option
+    'customer-ratio-matrix-sync.ts', // 2026-11-25 专属倍率矩阵两键同步(UI 为准):读写 option
 ];
 
 /**
