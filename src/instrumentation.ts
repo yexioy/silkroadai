@@ -88,6 +88,10 @@ export async function register() {
     const { startTicketAutoAdvanceScheduler } = await import('@/lib/scheduler/ticket-auto-advance');
     startTicketAutoAdvanceScheduler();
 
+    // 2026-11-25:分组倍率三键同步 —— 以后台 UI 写的 GroupRatio 为准,每分钟复制到另外两键。
+    const { startGroupRatioReconcileScheduler } = await import('@/lib/scheduler/group-ratio-reconcile');
+    startGroupRatioReconcileScheduler();
+
     // OpenAI Batch API 兼容 worker:领 /v1/batches 批任务,逐行 self-fetch 重放
     // /v1/images/* 同步管线(计费在那条腿,worker 零计费逻辑)。5s cadence + 重入守卫。
     const { startBatchScheduler } = await import('@/lib/batch/worker');
