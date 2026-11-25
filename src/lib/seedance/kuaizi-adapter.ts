@@ -40,6 +40,12 @@ export const KUAIZI_TASK_ID_PREFIX = 'kz-cgt-';
 export interface KuaiziConfig {
     base: string;
     key: string;
+    /** 任务端点路径(缺省筷子的)。同为「方舟官方 contents/generations/tasks 直通」的上游(millu)复用本 client 时覆盖。 */
+    tasksPath?: string;
+    /** 日志里的上游名(缺省 kuaizi)。 */
+    name?: string;
+    /** 上游受理号本身就是方舟真号(cgt-,无 vendor_task_id 字段)—— millu 线。 */
+    arkNativeId?: boolean;
 }
 
 export function getKuaiziConfig(overrideKey?: string): KuaiziConfig | null {
@@ -95,14 +101,14 @@ export async function submitKuaiziTask(
     });
     let upstream: Response;
     try {
-        upstream = await fetch(`${cfg.base}${TASKS_PATH}`, {
+        upstream = await fetch(`${cfg.base}${cfg.tasksPath ?? TASKS_PATH}`, {
             method: 'POST',
             headers: { Authorization: `Bearer ${cfg.key}`, 'Content-Type': 'application/json' },
             body: JSON.stringify(upstreamBody),
             signal: AbortSignal.timeout(30000),
         });
     } catch (e) {
-        console.warn(`[${tag.log}] kuaizi submit unreachable`, { err: String(e) });
+        console.warn(`[${tag.log}] ${cfg.name ?? 'kuaizi'} submit unreachable`, { err: String(e) });
         return fail(502, 'upstream_unreachable', 'upstream temporarily unavailable, please retry');
     }
     const text = await upstream.text();
@@ -116,7 +122,7 @@ export async function submitKuaiziTask(
     if (!upstream.ok || !taskId) {
         // 上游原始报错体(含 request_id / 上游域名)只落日志;对客【透传原文】(仅剥身份标记,#271)。
         const cls = passthroughUpstreamError(text, upstream.status);
-        console.warn(`[${tag.log}] kuaizi submit failed`, {
+        console.warn(`[${tag.log}] ${cfg.name ?? 'kuaizi'} submit failed`, {
             model: tag.model,
             upstream_model: upstreamBody.model,
             status: upstream.status,
@@ -129,7 +135,7 @@ export async function submitKuaiziTask(
 }
 
 async function fetchTask(cfg: KuaiziConfig, upstreamId: string): Promise<{ http: number; text: string }> {
-    const r = await fetch(`${cfg.base}${TASKS_PATH}/${encodeURIComponent(upstreamId)}`, {
+    const r = await fetch(`${cfg.base}${cfg.tasksPath ?? TASKS_PATH}/${encodeURIComponent(upstreamId)}`, {
         headers: { Authorization: `Bearer ${cfg.key}`, Accept: 'application/json' },
         signal: AbortSignal.timeout(20000),
     });
@@ -184,7 +190,7 @@ export async function pollKuaiziTask(
     try {
         fetched = await fetchTask(cfg, upstreamId);
     } catch (e) {
-        console.warn(`[${tag.log}] kuaizi poll unreachable`, { id: clientId, err: String(e) });
+        console.warn(`[${tag.log}] ${cfg.name ?? 'kuaizi'} poll unreachable`, { id: clientId, err: String(e) });
         return err(502, 'upstream_unreachable', 'upstream temporarily unavailable, please retry');
     }
     const { http, text } = fetched;
@@ -200,7 +206,7 @@ export async function pollKuaiziTask(
     const bodyStatus = j && typeof j.status === 'string' && j.status ? j.status : '';
     if (http >= 400 && !bodyStatus) {
         const cls = passthroughUpstreamError(text, http);
-        console.warn(`[${tag.log}] kuaizi poll failed`, {
+        console.warn(`[${tag.log}] ${cfg.name ?? 'kuaizi'} poll failed`, {
             id: clientId,
             status: http,
             category: cls.category,
@@ -209,11 +215,14 @@ export async function pollKuaiziTask(
         return err(http >= 400 ? http : 502, 'upstream_error', cls.message, cls.category);
     }
     if (!j || !bodyStatus) {
-        console.warn(`[${tag.log}] kuaizi poll 2xx 但 body 非任务体`, { id: clientId, body: text.slice(0, 500) });
+        console.warn(`[${tag.log}] ${cfg.name ?? 'kuaizi'} poll 2xx 但 body 非任务体`, {
+            id: clientId,
+            body: text.slice(0, 500),
+        });
         return err(502, 'upstream_unreachable', 'upstream temporarily unavailable, please retry');
     }
     if (http >= 400) {
-        console.warn(`[${tag.log}] kuaizi poll 非2xx 但 body 带 status,按任务态处理`, {
+        console.warn(`[${tag.log}] ${cfg.name ?? 'kuaizi'} poll 非2xx 但 body 带 status,按任务态处理`, {
             id: clientId,
             http,
             taskStatus: bodyStatus,
@@ -243,12 +252,17 @@ export async function pollKuaiziTask(
         status === 'failed' ? String((j.error as { message?: string } | undefined)?.message || j.message || '') : '';
     const failReason =
         status === 'failed' ? sanitizeUpstreamText(rawFail, { keepOpaqueIds: true }) || 'generation failed' : '';
-    if (failReason) console.warn(`[${tag.log}] kuaizi task failed upstream`, { id: clientId, fail_reason: failReason });
+    if (failReason)
+        console.warn(`[${tag.log}] ${cfg.name ?? 'kuaizi'} task failed upstream`, {
+            id: clientId,
+            fail_reason: failReason,
+        });
     const usage = (j.usage ?? undefined) as Record<string, unknown> | undefined;
     // vendor_task_id 不对客(客户的 id 本身就是火山型号);只落日志供内部对账 + 判落没落方舟。
-    const vendorRaw = j.vendor_task_id;
+    // arkNativeId 的上游(millu)没有 vendor_task_id:受理号本身就是方舟号,同样落一行供对账 / 监控漂移。
+    const vendorRaw = j.vendor_task_id ?? (cfg.arkNativeId ? upstreamId : undefined);
     if (typeof vendorRaw === 'string' && vendorRaw) {
-        console.log(`[${tag.log}] kuaizi vendor task id`, {
+        console.log(`[${tag.log}] ${cfg.name ?? 'kuaizi'} vendor task id`, {
             id: clientId,
             vendor_task_id: vendorRaw,
             ark: isArkTaskId(vendorRaw),

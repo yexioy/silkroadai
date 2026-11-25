@@ -68,10 +68,19 @@ import {
     type KuaiziConfig,
 } from './kuaizi-adapter';
 import {
+    fromMilluMappedId,
+    getMilluConfig,
+    isMilluKey,
+    isMilluMappedId,
+    milluModelName,
+    toMilluMappedId,
+} from './millu-adapter';
+import {
     DraftTaskError,
     extractDraftTaskRef,
     resolveDraftTaskArkId,
     resolveDraftTaskArkIdKuaizi,
+    resolveDraftTaskArkIdMillu,
     rewriteDraftTaskId,
 } from './draft-task';
 
@@ -93,12 +102,14 @@ function err(status: number, code: string, message: string, category?: string) {
  * 火山渠道【提交】走哪家上游(2026-11-04 起 env 可选):
  *  - `kuaizi`(缺省):筷子 AI 开放平台(kuaizi-adapter.ts)—— operator 2026-11-04 决定换回。
  *  - `svcinf`:service-inference.ai /v2(svcinf-client.ts)—— 2026-09-22 ~ 11-04 用的那家,代码保留。
- * 【轮询】不看这个开关,按 volc_id_map 里上游号前缀分流(kz-cgt- → 筷子;mvt- → svcinf),所以两家的
- * 历史任务都能查、切换时在途任务不会孤儿化(2026-09-27 切 svcinf v1→v2 时吃过这个亏)。
+ *  - `millu`:agent.millu.tv(millu-adapter.ts,2026-11-25 接入)—— 方舟官方契约直通,受理号即方舟真号。
+ * 【轮询】不看这个开关,按 volc_id_map 里上游号前缀分流(kz-cgt- → 筷子;mvt- → svcinf;millu: → millu),
+ * 所以各家的历史任务都能查、切换时在途任务不会孤儿化(2026-09-27 切 svcinf v1→v2 时吃过这个亏)。
  */
-export type VolcProvider = 'kuaizi' | 'svcinf';
+export type VolcProvider = 'kuaizi' | 'svcinf' | 'millu';
 export function volcProvider(): VolcProvider {
-    return process.env.ENTERPRISE_VOLC_PROVIDER?.trim().toLowerCase() === 'svcinf' ? 'svcinf' : 'kuaizi';
+    const v = process.env.ENTERPRISE_VOLC_PROVIDER?.trim().toLowerCase();
+    return v === 'svcinf' || v === 'millu' ? v : 'kuaizi';
 }
 
 /** service-inference.ai 线配置(/v2:直传 URL 素材经 preparing 自动上传 + 支持预传句柄)。 */
@@ -116,7 +127,9 @@ export function getVolcUpstreamConfig(overrideKey?: string): SvcinfConfig | null
  *  两家的 key 形态都认(kz- 筷子 / sk-inf- svcinf);真正用哪把由对应 provider 自己按前缀挑(见 keyFor)。 */
 export function customerVolcUpstreamKey(upstreamKey: string | undefined | null): string | undefined {
     if (!upstreamKey) return undefined;
-    return upstreamKey.startsWith(KUAIZI_KEY_PREFIX) || upstreamKey.startsWith(SVCINF_KEY_PREFIX)
+    return upstreamKey.startsWith(KUAIZI_KEY_PREFIX) ||
+        upstreamKey.startsWith(SVCINF_KEY_PREFIX) ||
+        isMilluKey(upstreamKey)
         ? upstreamKey
         : undefined;
 }
@@ -125,6 +138,7 @@ export function customerVolcUpstreamKey(upstreamKey: string | undefined | null):
 function keyFor(provider: VolcProvider, customerKey?: string): string | undefined {
     if (!customerKey) return undefined;
     if (provider === 'kuaizi') return isKuaiziKey(customerKey) ? customerKey : undefined;
+    if (provider === 'millu') return isMilluKey(customerKey) ? customerKey : undefined;
     return customerKey.startsWith(SVCINF_KEY_PREFIX) ? customerKey : undefined;
 }
 
@@ -281,11 +295,17 @@ export async function submitVolcVideo(body: Record<string, unknown>, opts: VolcS
         provider === 'svcinf' ? getVolcUpstreamConfig(keyFor('svcinf', opts.upstreamKey)) : null;
     const kzCfg: KuaiziConfig | null =
         provider === 'kuaizi' ? getKuaiziConfig(keyFor('kuaizi', opts.upstreamKey)) : null;
-    if (!svcCfg && !kzCfg) return err(503, 'temporarily_unavailable', '火山渠道未配置,请联系服务方');
+    const mlCfg: KuaiziConfig | null = provider === 'millu' ? getMilluConfig(keyFor('millu', opts.upstreamKey)) : null;
+    if (!svcCfg && !kzCfg && !mlCfg) return err(503, 'temporarily_unavailable', '火山渠道未配置,请联系服务方');
 
     const spec = VOLC_MODELS[opts.clientModel];
-    // 筷子收火山方舟官方 Model ID;service-inference.ai 收套餐形态(-max)。
-    const upstreamModel = provider === 'kuaizi' ? spec?.upstream : upstreamModelName(opts.clientModel);
+    // 筷子收火山方舟官方 Model ID;service-inference.ai 收套餐形态(-max);millu 收它自己的别名。
+    const upstreamModel =
+        provider === 'kuaizi'
+            ? spec?.upstream
+            : provider === 'millu'
+              ? spec && milluModelName(spec.variant)
+              : upstreamModelName(opts.clientModel);
     if (!spec || !upstreamModel) return err(400, 'model_not_found', `unknown model: ${opts.clientModel}`);
     // 兜底(主闸在 proxy 的 resolveEnterpriseModel):下架档位不打上游,避免白花钱。
     if (isVolcModelWithdrawn(opts.clientModel)) return err(400, 'model_unavailable', WITHDRAWN_VOLC_HINT);
@@ -302,9 +322,11 @@ export async function submitVolcVideo(body: Record<string, unknown>, opts: VolcS
     }
     if (draftRef) {
         // 样片在哪家建的就去哪家取方舟真号(按映射表上游号前缀判,与提交 provider 无关)。
-        const r = kzCfg
-            ? await resolveDraftTaskArkIdKuaizi(kzCfg, draftRef.id, LOG)
-            : await resolveDraftTaskArkId(svcCfg as SvcinfConfig, draftRef.id, LOG);
+        const r = mlCfg
+            ? await resolveDraftTaskArkIdMillu(draftRef.id)
+            : kzCfg
+              ? await resolveDraftTaskArkIdKuaizi(kzCfg, draftRef.id, LOG)
+              : await resolveDraftTaskArkId(svcCfg as SvcinfConfig, draftRef.id, LOG);
         if (!r.ok) return err(r.status, r.code, r.message);
         content = rewriteDraftTaskId(content, r.arkId);
     }
@@ -366,7 +388,14 @@ export async function submitVolcVideo(body: Record<string, unknown>, opts: VolcS
     let taskId: string;
     // svcinf 要记 API 版本(/v1 与 /v2 任务互不可见,轮询按创建版本打);筷子无此概念。
     let apiVersion: SvcinfApiVersion | undefined;
-    if (kzCfg) {
+    // millu:受理号本身就是方舟真号 → 直接作对客号;映射行带线标供轮询分流(见 millu-adapter 头注)。
+    let clientTaskId: string | undefined;
+    if (mlCfg) {
+        const r = await submitKuaiziTask(mlCfg, upstreamBody, tag);
+        if (!r.ok) return r.res;
+        clientTaskId = r.taskId;
+        taskId = toMilluMappedId(r.taskId);
+    } else if (kzCfg) {
         const r = await submitKuaiziTask(kzCfg, upstreamBody, tag);
         if (!r.ok) return r.res;
         taskId = r.taskId;
@@ -378,7 +407,7 @@ export async function submitVolcVideo(body: Record<string, unknown>, opts: VolcS
     }
     // 对客 id = 我们【即时自造】的火山方舟形任务号;上游受理号(kz-cgt-… / mvt-…)是唯一可轮询句柄,
     // 存映射供轮询按前缀分流换回去打上游。方舟真号(vendor_task_id / metadata.id)只落日志供内部对账。
-    const clientTaskId = makeArkTaskId();
+    clientTaskId ??= makeArkTaskId();
     await rememberVolcId(clientTaskId, taskId, 'task', undefined, apiVersion);
     return NextResponse.json(
         {
@@ -409,12 +438,20 @@ export async function pollVolcVideo(id: string, upstreamKey?: string): Promise<N
         // svcinf 线自上线起恒 /v2(cfg.api 固定),存量无版本行也一定是 /v2 建的 → 钉死版本,404 不回退 /v1 白打一次。
         return pollSvcinfTask(cfg, id, mapped.upstreamId, tag, { apiVersion: mapped.apiVersion ?? cfg.api });
     }
+    // 映射行缺失(rememberVolcId 写失败不抛)且当前提交线是 millu → 对客号本身就是方舟真号,直接按 millu 查,
+    // 不落到下面「远古筷子任务」的 kz-cgt- 兜底里去 404。
+    const milluUnmapped = mapped.upstreamId === id && volcProvider() === 'millu' && id.startsWith('cgt-');
+    if (isMilluMappedId(mapped.upstreamId) || milluUnmapped) {
+        const ml = getMilluConfig(keyFor('millu', upstreamKey));
+        if (!ml) return err(503, 'temporarily_unavailable', '火山渠道(millu 线)未配置,请联系服务方');
+        return pollKuaiziTask(ml, id, milluUnmapped ? id : fromMilluMappedId(mapped.upstreamId), tag);
+    }
     const kz = getKuaiziConfig(keyFor('kuaizi', upstreamKey));
     if (!kz) return err(503, 'temporarily_unavailable', '火山渠道未配置,请联系服务方');
     return pollKuaiziTask(kz, id, undisguiseKuaiziId(mapped.upstreamId), tag);
 }
 
-/** 取消任务:两家上游都【无取消/删除端点】。
+/** 取消任务:几家上游都【无取消/删除端点】。
  *  返回 null = 不支持 —— proxy 侧 best-effort,不阻断客户删除本地任务记录。 */
 export async function cancelVolcVideo(_id: string): Promise<Response | null> {
     return null;
