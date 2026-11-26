@@ -632,7 +632,7 @@ describe('seedance 2.5 判定(2026-08-07,国内版新代)', () => {
         expect(variantForModel('seedance-2-5')).toBe('2.5'); // 客户短名(任务行存这个)
         expect(variantForModel('seedance2.5-720p')).toBe('2.5'); // 内部长名
         expect(variantForModel('seedance2.5-1080p-ref')).toBe('2.5');
-        expect(variantForModel('artsdance-2-5-pro-260801')).toBe('2.5'); // 上游名
+        expect(variantForModel('artsdance-2-5-pro-261101')).toBe('2.5'); // 上游名
         // 不误伤既有 2.0 系
         expect(variantForModel('seedance-2-0')).toBe('pro');
         expect(regionForModel('seedance-2-5')).toBe('cn');
@@ -643,7 +643,7 @@ describe('seedance 2.5 判定(2026-08-07,国内版新代)', () => {
         for (const name of ['seedance2.5-720p', 'seedance2.5-720p-ref', 'seedance2.5-1080p', 'seedance2.5-1080p-ref']) {
             expect(MODEL_MAP[name]).toBeTruthy();
             expect(MODEL_MAP[name].variant).toBe('2.5');
-            expect(MODEL_MAP[name].upstream).toBe('artsdance-2-5-pro-260801');
+            expect(MODEL_MAP[name].upstream).toBe('artsdance-2-5-pro-261101');
             expect(MODEL_MAP[name].region).toBeUndefined(); // 缺省 = cn base
         }
         // 480p 单档走原版(pro 版上游拒 480p,2026-09-07 开档)
@@ -658,7 +658,7 @@ describe('seedance 2.5 判定(2026-08-07,国内版新代)', () => {
             expect(MODEL_MAP[name]).toBeTruthy();
             expect(MODEL_MAP[name].variant).toBe('2.5');
             expect(MODEL_MAP[name].resolution).toBe('4k');
-            expect(MODEL_MAP[name].upstream).toBe('artsdance-2-5-pro-260801');
+            expect(MODEL_MAP[name].upstream).toBe('artsdance-2-5-pro-261101');
             expect(MODEL_MAP[name].provider).toBeUndefined();
             expect(MODEL_MAP[name].region).toBeUndefined();
         }
@@ -1035,7 +1035,7 @@ describe('国内版 2.5 480p 单档 → service-inference.ai(缺省 /v2,env 可�
     it('seedance2.5-720p 不受影响,仍走 xinhankr pro 版', async () => {
         await submitVideo(makeReq({ model: 'seedance2.5-720p', prompt: 'x' }));
         expect(svcSubmitCall()).toBeUndefined();
-        expect(submitBody().model).toBe('artsdance-2-5-pro-260801');
+        expect(submitBody().model).toBe('artsdance-2-5-pro-261101');
         expect(rememberVolcId).not.toHaveBeenCalled();
     });
 
@@ -1043,7 +1043,7 @@ describe('国内版 2.5 480p 单档 → service-inference.ai(缺省 /v2,env 可�
         const res = await submitVideo(makeReq({ model: 'seedance2.5-4k', prompt: 'x' }));
         expect(res.status).toBe(200);
         expect(svcSubmitCall()).toBeUndefined();
-        expect(submitBody().model).toBe('artsdance-2-5-pro-260801');
+        expect(submitBody().model).toBe('artsdance-2-5-pro-261101');
         expect(submitBody().resolution).toBe('4k');
         expect(rememberVolcId).not.toHaveBeenCalled();
     });
