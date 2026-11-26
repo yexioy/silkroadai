@@ -26,6 +26,19 @@ import { encodeQuality, transcodeB64, transcodeTargetOf } from '@/lib/image/tran
 import { newGenerationId } from '@/lib/image/generation-id';
 import { addPartialUsage, takePartialFrames } from '@/lib/image/partial-billing';
 import { type AsyncTaskTransport, IMAGE_PROVIDERS, type ImageProvider } from './providers';
+import {
+    FAILOVER_MESSAGES,
+    UPSTREAM_BAD_IMAGE_RE,
+    badImageMessage,
+    badImageParam,
+    classifyFailKind,
+    dominantFailKind,
+    extractBadImageDetail,
+    failKindOfFetchError,
+    upstreamFail,
+    type FailKind,
+    type UpstreamFail,
+} from './failover-kind';
 import { countImagePromptTokens } from '@/lib/tokens/count-text-tokens';
 import { officialImageInputTokens } from '@/lib/tokens/image-input-tokens';
 import {
@@ -298,13 +311,19 @@ export function synthUsage(inp: SynthUsageInput): Record<string, unknown> {
  *  【响应体恒定中性,分类码与原因串只进服务端日志】—— new-api 在自己的错误里会把上游 body 原文
  *  嵌进去(建渠道时测试按钮把整页 404 HTML 塞进 message 即实证),所以 gpt-image-2 全部渠道同时
  *  挂时,这里写进 body 的任何内容都可能被客户读到:`size_not_served` 这类分类码会泄漏"按尺寸分档
- *  路由"的内部结构,原因串还可能带出上游错误原文里 sanitizeAdapterError 正则没覆盖到的字眼。 */
-function failover(code: string, reason: string): NextResponse {
-    console.warn('[image-adapter] failover', { code, reason });
+ *  路由"的内部结构,原因串还可能带出上游错误原文里 sanitizeAdapterError 正则没覆盖到的字眼。
+ *
+ *  2026-11-26:message 不再是恒定一句,而是按 `kind` 从 FAILOVER_MESSAGES 的【固定枚举】里取 ——
+ *  此前所有原因都是同一句,对客统一成 503「engine overloaded」,客户把上游断供 / 模型回文字全读成
+ *  "资源饱和"。枚举文案同样不含上游原文与分档结构,上面的约束不变。 */
+function failover(code: string, reason: string, kind: FailKind): NextResponse {
+    console.warn('[image-adapter] failover', { code, kind, reason });
     return NextResponse.json(
         {
             error: {
-                message: 'The server is temporarily unable to process this request, please retry later.',
+                // 原因细分只体现在 message 上(固定枚举,见 failover-kind.ts);status 恒 503、code 恒
+                // upstream_unavailable —— 前者是 new-api 的重试语义,后者是客户日志页折叠内部重试行的依据。
+                message: FAILOVER_MESSAGES[kind],
                 type: 'server_error',
                 code: 'upstream_unavailable',
             },
@@ -333,29 +352,53 @@ export function sanitizeAdapterError(text: string, brand: RegExp): string {
 // generated image was rejected by the moderation system` —— 旧正则全漏 → 当瞬时错 failover → 客户拿 503
 // 「temporarily unable」并重试放大(部署后 10 分钟内占 503 真因 83%;近 1h 6,476 次 failover 仅 9.8% 挽回)。
 const UPSTREAM_SAFETY_RE =
-    /image_unsafe|image_safety|content_safety|content_filter|content rejected|appear to be unsafe|safety policy|content safety|content policy violation|moderation system/i;
+    /image_unsafe|image_safety|content_safety|content_filter|content rejected|appear to be unsafe|safety policy|content safety|content policy violation|moderation system|violate our guardrails/i;
 // 蒙版类(尺寸不一致 / 缺 alpha)是确定性入参错,换渠道也拒 → 终态 400,不再 failover 成 503「overloaded」
 const UPSTREAM_BADREQ_RE =
     /prompt is required|invalid image|bad_request|validation_error|undefined mention|mask must have the same dimensions|invalid mask/i;
 const UPSTREAM_CHANNEL_RE = /no available channel|model_not_found/i;
 
-type TerminalReject = { terminal: 'safety' | 'bad_request' };
-function isTerminalReject(x: string[] | TerminalReject | null): x is TerminalReject {
-    return x !== null && !Array.isArray(x);
+type TerminalReject =
+    | { terminal: 'safety' | 'bad_request' }
+    /** 输入图 / 蒙版本身坏或格式不支持(确定性,换渠道也拒);detail = 可展示的具体原因(已脱敏)。 */
+    | { terminal: 'bad_image'; detail: string };
+/** 一次上游调用的结果:图片 b64 数组 / 终态拒绝(不 failover)/ 非终态失败(failover,带原因)。 */
+type UpstreamResult = string[] | TerminalReject | UpstreamFail;
+function isTerminalReject(x: UpstreamResult): x is TerminalReject {
+    return !Array.isArray(x) && 'terminal' in x;
 }
 
-/** 上游 4xx → 是否终态化(不 failover)+ 归类。5xx / 渠道特定 → null(failover)。 */
-function classifyUpstreamError(status: number, text: string): TerminalReject | null {
-    if (status >= 500) return null; // 5xx → failover
-    if (UPSTREAM_CHANNEL_RE.test(text)) return null; // 渠道特定(换渠道有意义)→ failover
+/** 上游错误 → 终态(不 failover)还是 failover + 原因。5xx / 渠道特定 / 不确定的 4xx → failover。 */
+function classifyUpstreamError(status: number, text: string, brand: RegExp): TerminalReject | UpstreamFail {
+    // 输入图本身坏 / 格式不支持:同样字节换渠道也拒 → 终态 400。号池上游对此会回 502,所以放在 5xx 判定之前。
+    if (UPSTREAM_BAD_IMAGE_RE.test(text)) {
+        return { terminal: 'bad_image', detail: extractBadImageDetail(text, (s) => sanitizeAdapterError(s, brand)) };
+    }
+    const fail = upstreamFail(classifyFailKind(status, text));
+    if (status >= 500) return fail; // 5xx → failover
+    if (UPSTREAM_CHANNEL_RE.test(text)) return fail; // 渠道特定(换渠道有意义)→ failover
     if (status === 451 || UPSTREAM_SAFETY_RE.test(text)) return { terminal: 'safety' }; // 451 = 内容安全
     if (UPSTREAM_BADREQ_RE.test(text)) return { terminal: 'bad_request' };
-    return null; // 其余 4xx 保守 failover(不确定是否终态)
+    return fail; // 其余 4xx 保守 failover(不确定是否终态)
 }
 
 /** 终态错误响应(4xx,new-api 不 failover):内容安全 / 请求本身错。body 身份中性。 */
-function terminalReject(kind: 'safety' | 'bad_request'): NextResponse {
-    console.warn('[image-adapter] terminal reject (no failover)', { kind });
+function terminalReject(reject: TerminalReject): NextResponse {
+    const kind = reject.terminal;
+    console.warn('[image-adapter] terminal reject (no failover)', reject);
+    if (reject.terminal === 'bad_image') {
+        return NextResponse.json(
+            {
+                error: {
+                    message: badImageMessage(reject.detail),
+                    type: 'invalid_request_error',
+                    param: badImageParam(reject.detail),
+                    code: 'invalid_image',
+                },
+            },
+            { status: 400 },
+        );
+    }
     if (kind === 'safety') {
         // 直接发【官方 gpt-image 现行审核形】moderation_blocked / user_error(2026-09-06 从旧
         // content_policy_violation 对齐)—— 直连 :3000 绕过 portal 的客户也拿官方形。官方 message
@@ -487,7 +530,8 @@ async function fetchImageAsB64(url: string, headers?: Record<string, string>): P
 }
 
 /**
- * 单次上游调用 → 返回该次拿到的图片 b64 数组;任何失败返 null(原因已记日志,调用方决定是否 failover)。
+ * 单次上游调用 → 返回该次拿到的图片 b64 数组;终态错返 TerminalReject;其余失败返 UpstreamFail
+ * (原因已记日志,调用方决定是否 failover,并按原因选 failover 文案)。
  *
  * 【为什么每次只要 1 张】ominiapi 实测**完全忽略 `n`**(传 n=2 仍只回 1 张,2026-08-04 直连验证),
  * 而 azure 渠道是支持 n 的 —— 适配器 prio 25 截走 4K/2K-high 后,客户的多图请求只能拿到 1 张
@@ -501,7 +545,7 @@ async function callUpstreamOnce(
     mode: ImageMode,
     parsed: ParsedRequest,
     auth: string,
-): Promise<string[] | TerminalReject | null> {
+): Promise<UpstreamResult> {
     // 异步任务形上游(providers.ts transport)→ 独立分支;其余 provider 走下面的同步直转,路径不变。
     if (provider.transport?.kind === 'async-task')
         return callUpstreamAsyncTask(provider, provider.transport, providerName, mode, parsed, auth);
@@ -556,7 +600,7 @@ async function callUpstreamOnce(
             timeoutMs,
             err: e instanceof Error ? e.message : String(e),
         });
-        return null;
+        return upstreamFail(failKindOfFetchError(e));
     } finally {
         clearTimeout(timer);
     }
@@ -570,8 +614,8 @@ async function callUpstreamOnce(
             ms: Date.now() - started,
             body: sanitizeAdapterError(errText.slice(0, 500), provider.brand),
         });
-        // 内容安全 / 请求本身错 → 终态化(换渠道也拒);渠道特定 / 5xx → null 让调用方 failover。
-        return classifyUpstreamError(upstream.status, errText);
+        // 内容安全 / 请求本身错 → 终态化(换渠道也拒);渠道特定 / 5xx → UpstreamFail 让调用方 failover。
+        return classifyUpstreamError(upstream.status, errText, provider.brand);
     }
 
     const data = (await upstream.json().catch(() => null)) as {
@@ -584,7 +628,7 @@ async function callUpstreamOnce(
             mode,
             ms: Date.now() - started,
         });
-        return null;
+        return upstreamFail('error');
     }
 
     // 上游 URL 一律不外泄(response_format 被无视时仍可能返 url —— 它指向上游自家 OSS,
@@ -598,7 +642,7 @@ async function callUpstreamOnce(
         const b64 = await fetchImageAsB64(it.url as string, provider.imageFetchHeaders);
         if (!b64) {
             console.warn('[image-adapter] url→b64 fetch failed', { provider: providerName, mode });
-            return null;
+            return upstreamFail('error');
         }
         out.push(b64);
     }
@@ -626,7 +670,7 @@ async function callUpstreamAsyncTask(
     mode: ImageMode,
     parsed: ParsedRequest,
     auth: string,
-): Promise<string[] | TerminalReject | null> {
+): Promise<UpstreamResult> {
     const started = Date.now();
     const headers: Record<string, string> = { authorization: auth, 'content-type': 'application/json' };
     const body: Record<string, unknown> = { model: provider.upstreamModel ?? 'gpt-image-2', prompt: parsed.prompt };
@@ -654,7 +698,7 @@ async function callUpstreamAsyncTask(
             ms: Date.now() - started,
             err: e instanceof Error ? e.message : String(e),
         });
-        return null;
+        return upstreamFail(failKindOfFetchError(e));
     }
     if (!submit.ok) {
         const errText = await submit.text().catch(() => '');
@@ -666,13 +710,13 @@ async function callUpstreamAsyncTask(
             ms: Date.now() - started,
             body: sanitizeAdapterError(errText.slice(0, 500), provider.brand),
         });
-        return classifyUpstreamError(submit.status, errText);
+        return classifyUpstreamError(submit.status, errText, provider.brand);
     }
     const submitJson = (await submit.json().catch(() => null)) as Record<string, unknown> | null;
     const taskId = submitJson?.[transport.idField];
     if (typeof taskId !== 'string' || !taskId) {
         console.warn('[image-adapter] async-task submit returned no task id', { provider: providerName, mode });
-        return null;
+        return upstreamFail('error');
     }
 
     const pollUrl = `${provider.baseUrl}${transport.pollPath.replace('{id}', encodeURIComponent(taskId))}`;
@@ -701,7 +745,7 @@ async function callUpstreamAsyncTask(
                     ms: Date.now() - started,
                     body: sanitizeAdapterError(errText.slice(0, 300), provider.brand),
                 });
-                return null;
+                return upstreamFail(classifyFailKind(poll.status, errText));
             }
             continue;
         }
@@ -720,7 +764,7 @@ async function callUpstreamAsyncTask(
             ms: Date.now() - started,
             maxWaitMs: transport.maxWaitMs,
         });
-        return null;
+        return upstreamFail('timeout');
     }
     const status = String(task.status).toLowerCase();
     if (ASYNC_TASK_FAILED.has(status)) {
@@ -734,15 +778,15 @@ async function callUpstreamAsyncTask(
             body: sanitizeAdapterError(errText.slice(0, 500), provider.brand),
         });
         // 任务级失败没有 HTTP 状态:只认内容安全措辞为终态,其余(provider task failed / request invalid)保守 failover
-        const cls = classifyUpstreamError(400, errText);
-        return cls && cls.terminal === 'safety' ? cls : null;
+        const cls = classifyUpstreamError(400, errText, provider.brand);
+        return isTerminalReject(cls) && cls.terminal !== 'safety' ? upstreamFail(classifyFailKind(400, errText)) : cls;
     }
     const rawItems = Array.isArray(task.data)
         ? (task.data as Array<{ b64_json?: string; url?: string }>).filter((it) => it && (it.b64_json || it.url))
         : [];
     if (rawItems.length === 0) {
         console.warn('[image-adapter] async-task succeeded without image', { provider: providerName, mode });
-        return null;
+        return upstreamFail('error');
     }
     const out: string[] = [];
     for (const it of rawItems) {
@@ -753,7 +797,7 @@ async function callUpstreamAsyncTask(
         const b64 = await fetchImageAsB64(it.url as string, transport.imageFetchHeaders);
         if (!b64) {
             console.warn('[image-adapter] url→b64 fetch failed', { provider: providerName, mode });
-            return null;
+            return upstreamFail('error');
         }
         out.push(b64);
     }
@@ -774,7 +818,8 @@ export async function handleAdapterImage(
     providerName: string,
 ): Promise<NextResponse> {
     const provider = IMAGE_PROVIDERS[providerName];
-    if (!provider) return failover('unknown_provider', `image-adapter provider '${providerName}' not registered`);
+    if (!provider)
+        return failover('unknown_provider', `image-adapter provider '${providerName}' not registered`, 'error');
     const auth = req.headers.get('authorization');
     if (!auth)
         return NextResponse.json(
@@ -783,7 +828,7 @@ export async function handleAdapterImage(
         );
 
     const parsed = await parseIncoming(req, mode);
-    if (!parsed) return failover('bad_request_body', 'unparseable request body');
+    if (!parsed) return failover('bad_request_body', 'unparseable request body', 'error');
     // 伪流式 partial 帧数(/v1 代理经 user 尾标记传来,见 @/lib/image/partial-billing):取出并还原 user,usage 合成后加收。
     const partialFrames = takePartialFrames(parsed.extras);
 
@@ -795,7 +840,7 @@ export async function handleAdapterImage(
     const wantsTransparent = (parsed.extras.background || '').trim().toLowerCase() === 'transparent';
     if (provider.noTransparentBackground && wantsTransparent) {
         console.log('[image-adapter] transparent not served', { provider: providerName, mode });
-        return failover('transparent_not_served', 'provider not verified for background=transparent');
+        return failover('transparent_not_served', 'provider not verified for background=transparent', 'unsupported');
     }
 
     // ---- 尺寸白名单(调上游之前,不花钱)----
@@ -809,7 +854,11 @@ export async function handleAdapterImage(
                 mode,
                 size: parsed.size || 'auto',
             });
-            return failover('size_not_served', `size ${parsed.size || 'auto'} not in provider size list`);
+            return failover(
+                'size_not_served',
+                `size ${parsed.size || 'auto'} not in provider size list`,
+                'unsupported',
+            );
         }
     }
 
@@ -886,6 +935,7 @@ export async function handleAdapterImage(
         return failover(
             'below_gate',
             `size ${parsed.size || 'unknown'} / quality ${quality} (ct ${perImageCt}) below sell-price gate`,
+            'unsupported',
         );
     }
 
@@ -897,7 +947,7 @@ export async function handleAdapterImage(
     }
     const fanoutRound = (count: number) =>
         Promise.all(Array.from({ length: count }, () => callUpstreamOnce(provider, providerName, mode, parsed, auth)));
-    const collect = (rs: (string[] | TerminalReject | null)[]) =>
+    const collect = (rs: UpstreamResult[]) =>
         rs.flatMap((r) =>
             (Array.isArray(r) ? r : []).map((b64_json) => ({ b64_json, generation_id: newGenerationId() })),
         );
@@ -906,11 +956,11 @@ export async function handleAdapterImage(
     let roundMs = Date.now() - started;
     // 任一扇出返回【终态】(内容安全 / 请求本身错)→ 立即终态化,不 failover(换渠道也拒,别浪费重试位)。
     const terminal = results.find(isTerminalReject);
-    if (terminal) return terminalReject(terminal.terminal);
+    if (terminal) return terminalReject(terminal);
     let items = collect(results);
     if (items.length === 0) {
         // 全军覆没才 failover(部分成功 → 先补齐,见下)。这里【不】补打:换渠道比原地重试更可能成。
-        return failover('upstream_error', `all ${fanout} upstream call(s) failed`);
+        return failover('upstream_error', `all ${fanout} upstream call(s) failed`, dominantFailKind(results));
     }
 
     // ---- n 补齐(2026-09-23)----
@@ -988,7 +1038,8 @@ export async function handleAdapterImage(
             });
         }
         if (kept.length === 0) {
-            return failover('transparent_not_delivered', 'upstream returned image(s) without alpha channel');
+            // 上游这次没出真透明(号池随机)→ 可重试的生成失败,不是"参数不支持"
+            return failover('transparent_not_delivered', 'upstream returned image(s) without alpha channel', 'error');
         }
         items = kept;
     }
@@ -1037,7 +1088,7 @@ export async function handleAdapterImage(
             fallback: `${fb.w}x${fb.h}`,
         });
     } else {
-        return failover('unbillable_auto', 'size unparsable and output image dimensions unreadable');
+        return failover('unbillable_auto', 'size unparsable and output image dimensions unreadable', 'error');
     }
 
     // ---- 合成 usage(丢弃上游假 token,按官方公式)----

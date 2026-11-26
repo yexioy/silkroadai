@@ -862,20 +862,90 @@ console.log(resp.choices[0].message.content);`}
                                     </td>
                                 </tr>
                                 <tr className="border-b border-brand-border">
-                                    <td className="px-4 py-3 font-mono text-navy align-top">500</td>
-                                    <td className="px-4 py-3 font-mono text-navy align-top">server_error / —</td>
+                                    <td className="px-4 py-3 font-mono text-navy align-top">400</td>
+                                    <td className="px-4 py-3 font-mono text-navy align-top">
+                                        invalid_request_error / no_image_generated
+                                    </td>
                                     <td className="px-4 py-3 text-ink">
-                                        平台或上游临时错误(超时、网络抖动、空返回)。直接重试即可。
+                                        <strong className="text-navy">模型没有出图</strong>
+                                        :提示词被理解成了文字类请求(要方案、要提示词列表、要格式转换),或提示词提到了参考图但请求里没带。
+                                        <strong className="text-navy">原样重发无效</strong>
+                                        ,请直接描述想要的画面;需要参考图时用{' '}
+                                        <code className="font-mono text-xs">/v1/images/edits</code> 附上。
+                                    </td>
+                                </tr>
+                                <tr className="border-b border-brand-border">
+                                    <td className="px-4 py-3 font-mono text-navy align-top">500</td>
+                                    <td className="px-4 py-3 font-mono text-navy align-top">
+                                        server_error / upstream_error
+                                    </td>
+                                    <td className="px-4 py-3 text-ink">
+                                        平台或上游临时错误(网络抖动、空返回、上游内部故障)。直接重试即可。
+                                    </td>
+                                </tr>
+                                <tr className="border-b border-brand-border">
+                                    <td className="px-4 py-3 font-mono text-navy align-top">500</td>
+                                    <td className="px-4 py-3 font-mono text-navy align-top">
+                                        server_error / upstream_timeout
+                                    </td>
+                                    <td className="px-4 py-3 text-ink">
+                                        出图超时(本次没有在时限内生成完)。直接重试即可;高分辨率 / 高档位更容易遇到。
+                                    </td>
+                                </tr>
+                                <tr className="border-b border-brand-border">
+                                    <td className="px-4 py-3 font-mono text-navy align-top">503</td>
+                                    <td className="px-4 py-3 font-mono text-navy align-top">
+                                        server_error / engine_overloaded
+                                    </td>
+                                    <td className="px-4 py-3 text-ink">
+                                        <strong className="text-navy">线路过载 / 上游限流</strong>(真正的
+                                        overloaded)。按响应头{' '}
+                                        <code className="font-mono text-xs bg-paper-muted px-1.5 py-0.5 rounded border border-brand-border text-navy">
+                                            Retry-After
+                                        </code>{' '}
+                                        的秒数退避后重试,密集立即重发会加剧过载。
+                                    </td>
+                                </tr>
+                                <tr className="border-b border-brand-border">
+                                    <td className="px-4 py-3 font-mono text-navy align-top">503</td>
+                                    <td className="px-4 py-3 font-mono text-navy align-top">
+                                        server_error / upstream_unavailable
+                                    </td>
+                                    <td className="px-4 py-3 text-ink">
+                                        <strong className="text-navy">该模型的线路暂时不可用</strong>
+                                        (供给侧故障,
+                                        <strong className="text-navy">不是资源饱和,也不是你的请求有问题</strong>
+                                        )。可稍后重试;若持续出现请联系我们,无需调整并发或参数。
                                     </td>
                                 </tr>
                                 <tr>
                                     <td className="px-4 py-3 font-mono text-navy align-top">503</td>
-                                    <td className="px-4 py-3 font-mono text-navy align-top">server_error / —</td>
-                                    <td className="px-4 py-3 text-ink">线路繁忙(overloaded)。稍等 30 秒以上再重试。</td>
+                                    <td className="px-4 py-3 font-mono text-navy align-top">
+                                        server_error / parameter_combination_unavailable
+                                    </td>
+                                    <td className="px-4 py-3 text-ink">
+                                        当前没有线路承接这组参数(尺寸 / 档位 / 透明背景 /
+                                        蒙版的组合)。换一组参数通常立即可用;原参数也可稍后重试。
+                                    </td>
                                 </tr>
                             </tbody>
                         </table>
                     </div>
+                    <p className="m-0 mt-3 mb-3 text-sm text-ink leading-relaxed">
+                        <strong className="text-navy">2026-11-26 起 5xx 细分</strong>:此前所有非终态失败都以{' '}
+                        <code className="font-mono text-xs bg-paper-muted px-1.5 py-0.5 rounded border border-brand-border text-navy">
+                            503 The engine is currently overloaded
+                        </code>{' '}
+                        返回(<code className="font-mono text-xs">code</code> 为空),看不出真实原因。现在按原因拆成上表的
+                        5 个 <code className="font-mono text-xs">code</code>:只有{' '}
+                        <code className="font-mono text-xs">engine_overloaded</code> 才表示过载;
+                        <code className="font-mono text-xs">upstream_error</code> /{' '}
+                        <code className="font-mono text-xs">upstream_timeout</code> 的 HTTP 状态由 503 改为
+                        500;模型没出图由 503 改为 400 <code className="font-mono text-xs">no_image_generated</code>
+                        ;输入图损坏 / 格式不支持(如 avif)由 503 改为 400{' '}
+                        <code className="font-mono text-xs">invalid_image</code>,message 会写明是第几张图、什么问题。500
+                        / 503 仍然都可以直接重试,官方 SDK 的自动重试行为不受影响。
+                    </p>
                     <p className="m-0 mt-3 mb-3 text-sm text-ink leading-relaxed">错误体示例(审核拒绝):</p>
                     <CodeBlock language="json">
                         {`{

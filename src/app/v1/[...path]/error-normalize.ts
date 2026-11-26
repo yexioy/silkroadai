@@ -12,7 +12,16 @@
  *
  * 分桶原则(呼应 failover 错误分类硬约束):归类只发生在 new-api 重试/failover 全部打完之后的
  * 展示层,不改变重试语义;不确定的 4xx 走 default 桶原样透传(仅抹品牌名),宁可保留原文也不误改写。
+ *
+ * 第 5 步(2026-11-26):拆开 503「engine overloaded」。此前适配器把一切非终态失败压成同一句,这里再统一
+ * 成 overloaded —— 24h 抽样 33 万条里真过载只占 ~3.5%,其余是上游断供,客户却读成"资源饱和"。现在适配器
+ * 的 failover 文案带原因(@/lib/image-adapter/failover-kind 固定枚举),这里按原因给不同 status + code:
+ *   上游断供 → 503 upstream_unavailable        上游限流/过载 → 503 engine_overloaded (+Retry-After)
+ *   上游 5xx/网络/空响应 → 500 upstream_error  超时 → 500 upstream_timeout
+ *   模型没出图 → 400 no_image_generated        参数组合无渠道承接 → 503 parameter_combination_unavailable
+ * 限制:new-api 只把【最后一次尝试】的错误回给我们,多渠道链路里前几跳的原因仍只在内部日志。
  */
+import { BAD_IMAGE_PREFIX, matchFailoverKind, type FailKind } from '@/lib/image-adapter/failover-kind';
 
 const OFFICIAL_TYPES = {
     invalidRequest: 'invalid_request_error',
@@ -55,8 +64,11 @@ const UPSTREAM_BADREQ_RE =
  *  自己就明确报 model_not_found 的形态(部分 new-api 型网关会)。 */
 const MODEL_NOT_FOUND_RE =
     /model_not_found|(?:model|模型).{0,40}(?:not found|not supported|does not exist|is not available|不存在|不支持|未找到)/i;
-const CAPACITY_RE =
-    /no available channel|无可用渠道|temporarily unable to process|service temporarily unavailable|currently overloaded/i;
+/** new-api 自己报无渠道(分组里该 model 没有启用的渠道)/ 直连渠道报服务不可用 → 断供。
+ *  适配器 failover 文案(含旧版 `temporarily unable to process`)由 matchFailoverKind 先一步认走。 */
+const CAPACITY_RE = /no available channel|无可用渠道|service temporarily unavailable/i;
+/** 临时错里的超时子类(直连渠道 / new-api 自己的网络错原文)。 */
+const TIMEOUT_RE = /context deadline exceeded|connection timed out|bad response status code (?:504|524)/i;
 const TRANSIENT_RE =
     /temporary error|unexpected eof|context deadline exceeded|tls handshake|connection reset|connection timed out|read tcp|do request failed|upstream request failed|bad response status code \d+|http: server gave/i;
 
@@ -65,6 +77,93 @@ export interface NormalizedImageError {
     status: number;
     /** 限流类:建议退避秒数,调用方写 `Retry-After` 响应头。 */
     retryAfter?: number;
+}
+
+/** 上游限流/过载的建议退避秒数(适配器文案里不带上游的 retry-after,给个保守常数)。 */
+const OVERLOADED_RETRY_AFTER = 30;
+
+/** 适配器 failover 原因 → 对客错误。status 只在这里才切到官方语义(适配器对 new-api 恒 503)。 */
+function failoverKindError(kind: FailKind): NormalizedImageError {
+    switch (kind) {
+        case 'unavailable':
+            return {
+                body: officialBody(
+                    'The service for this model is temporarily unavailable. This is not caused by your request — please try again later.',
+                    OFFICIAL_TYPES.serverError,
+                    'upstream_unavailable',
+                ),
+                status: 503,
+            };
+        case 'overloaded':
+            return {
+                body: officialBody(
+                    'The engine is currently overloaded, please try again later.',
+                    OFFICIAL_TYPES.serverError,
+                    'engine_overloaded',
+                ),
+                status: 503,
+                retryAfter: OVERLOADED_RETRY_AFTER,
+            };
+        case 'timeout':
+            return serverError('upstream_timeout');
+        case 'no_image':
+            // 模型把 prompt 读成要文字 / 要参考图,回了文字。同一 prompt 重试结果相同 → 400 让客户改 prompt。
+            return {
+                body: officialBody(
+                    'The model did not generate an image for this prompt. Describe the picture you want directly; if the prompt refers to a source image, attach it via /v1/images/edits.',
+                    OFFICIAL_TYPES.invalidRequest,
+                    'no_image_generated',
+                    'prompt',
+                ),
+                status: 400,
+            };
+        case 'unsupported':
+            // 仍给可重试的 503:我们只看得到最后一跳,无法确认【所有】渠道都不承接这个组合 ——
+            // 误判成终态 400 会让本可重试成功的请求被客户放弃(failover 分类硬约束:不确定就别终态化)。
+            return {
+                body: officialBody(
+                    'The requested parameter combination (size, quality, background or mask) is not currently available for this model. Try different parameters, or retry later.',
+                    OFFICIAL_TYPES.serverError,
+                    'parameter_combination_unavailable',
+                ),
+                status: 503,
+            };
+        case 'error':
+            return serverError('upstream_error');
+    }
+}
+
+/** 官方 500 server_error 体 + 细分 code。 */
+function serverError(code: 'upstream_error' | 'upstream_timeout'): NormalizedImageError {
+    return {
+        body: officialBody(
+            code === 'upstream_timeout'
+                ? 'The request timed out while generating the image. Please retry your request.'
+                : 'The server had an error while processing your request. Sorry about that! Please retry your request.',
+            OFFICIAL_TYPES.serverError,
+            code,
+        ),
+        status: 500,
+    };
+}
+
+/** 适配器已归一的输入图终态错(`Invalid input image: images[0] format avif is not supported…`)→ 取出细节。
+ *  不是这个形态(上游原文 / we-token 嵌套 JSON)→ ''。 */
+function adapterBadImageDetail(text: string): string {
+    let msg = '';
+    try {
+        const j = JSON.parse(text) as { error?: { message?: unknown } };
+        if (typeof j.error?.message === 'string') msg = j.error.message;
+    } catch {
+        return '';
+    }
+    if (!msg.startsWith(BAD_IMAGE_PREFIX)) return '';
+    const detail = msg
+        .slice(BAD_IMAGE_PREFIX.length)
+        .replace(/\s*\(request id: [^)]*\)\s*$/i, '')
+        .replace(/\badobe\b/gi, 'the provider')
+        .trim();
+    return /[{}<>]/.test(detail) ? '' : detail.slice(0, 200);
 }
 
 /** 从上游限流文案提取退避秒数(`retry-after=3s` / `try again in 3s`),提不到给 30。 */
@@ -111,6 +210,11 @@ export function normalizeImageError(
         };
     }
 
+    // 3b. 适配器 failover 文案(固定枚举,带原因)→ 按原因细分 status + code。排在限流 / 入参桶之前:
+    //     这几句是我方适配器自己写的,不能被后面针对上游原文的正则误吞。
+    const failoverKind = matchFailoverKind(text);
+    if (failoverKind) return failoverKindError(failoverKind);
+
     // 4. 限流/并发(合并 we-token 408/429 系、并发守门、azure region 文案、`bad response status code 408`)
     //    → 429 + Retry-After(此前对客是 408,2026-08-18 公告切换)
     if (THROTTLE_RE.test(text)) {
@@ -141,6 +245,19 @@ export function normalizeImageError(
             };
         }
         if (/invalid image file|invalid input image|unable to process input image/i.test(text)) {
+            // 适配器已给出具体原因(哪张图、截断 / 格式不支持)→ 原样保留,客户能直接定位
+            const detail = adapterBadImageDetail(text);
+            if (detail) {
+                return {
+                    body: officialBody(
+                        `${BAD_IMAGE_PREFIX}${detail}`,
+                        OFFICIAL_TYPES.invalidRequest,
+                        'invalid_image',
+                        /\bmask\b/i.test(detail) ? 'mask' : 'image',
+                    ),
+                    status: 400,
+                };
+            }
             // 多图 edits 保留出错的是第几张(`image 2`),客户能定位到具体素材
             const idx = /image (\d+)/i.exec(text)?.[1];
             return {
@@ -189,30 +306,17 @@ export function normalizeImageError(
         };
     }
 
-    // 6. 容量(new-api 无渠道 / 全线路 exhausted / 适配器守门透出)→ 503 overloaded
-    if (CAPACITY_RE.test(text)) {
-        return {
-            body: officialBody(
-                'The engine is currently overloaded, please try again later.',
-                OFFICIAL_TYPES.serverError,
-                null,
-            ),
-            status: 503,
-        };
-    }
+    // 6. 断供(new-api 报分组里该 model 无可用渠道 / 直连渠道报服务不可用)→ 503 upstream_unavailable。
+    //    此前这里统一成「engine overloaded」,客户误以为资源饱和;真过载走 3b 的 overloaded。
+    if (CAPACITY_RE.test(text)) return failoverKindError('unavailable');
 
     // 7. 上游临时错:显式特征(EOF / deadline / raw tcp / `bad response status code N`)或任何
     //    未识别的 5xx —— 一律 500 官方 server_error 体(此前对客散落 400/404/413/500/502/504;
     //    raw 网络错原文只留内部日志,不出门)
+    //    code 细分:超时 → upstream_timeout,其余 → upstream_error(官方 code 为 null,这里是我方扩展)。
     if (TRANSIENT_RE.test(text) || upstreamStatus >= 500) {
-        return {
-            body: officialBody(
-                'The server had an error while processing your request. Sorry about that! Please retry your request.',
-                OFFICIAL_TYPES.serverError,
-                null,
-            ),
-            status: 500,
-        };
+        const timedOut = TIMEOUT_RE.test(text) || upstreamStatus === 504 || upstreamStatus === 524;
+        return serverError(timedOut ? 'upstream_timeout' : 'upstream_error');
     }
 
     // 8. default:未识别的 4xx 原样透传(status 不动),仅抹上游品牌名(宁可保留原文也不误改写;
