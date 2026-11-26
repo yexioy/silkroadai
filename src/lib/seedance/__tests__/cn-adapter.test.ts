@@ -1407,6 +1407,7 @@ describe('海外版 proMax(2026-10-23 换回 artsmcp intl;存量 svcinf 任务�
             ['seedance2.0-global-mini-480p', 'dreamina-seedance-2-0-mini-260615-max', '480p'],
             ['seedance2.5-global-480p', 'dreamina-seedance-2-5-260628-max', '480p'],
             ['seedance2.5-global-1080p', 'dreamina-seedance-2-5-260628-max', '1080p'],
+            ['seedance2.5-global-4k', 'dreamina-seedance-2-5-260628-max', '4k'],
         ]) {
             mockFetch.mockClear();
             const r = await submitVideo(makeReq({ model, prompt: 'x' }, 'Bearer sk-cb097-artsmcp-row'));

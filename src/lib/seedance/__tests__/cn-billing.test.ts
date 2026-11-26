@@ -184,5 +184,8 @@ describe('officialCostCny(对账官方价:零售 ÷ 0.85)', () => {
         expect(variantForModel('seedance-2-5-global')).toBe('promax-2.5');
         expect(officialCostCny(1_000_000, '720p', false, 'promax-2.5')).toBeCloseTo(72.76, 4);
         expect(officialCostCny(1_000_000, '1080p', false, 'promax-2.5')).toBeCloseTo(80.24, 4);
+        // 4k(2026-11-25 global 2.5 开档):显式 32.3 / 19.8,不能回落 pro 4k 的 26 / 16
+        expect(officialCostCny(1_000_000, '4k', false, 'promax-2.5')).toBeCloseTo(32.3, 4);
+        expect(officialCostCny(1_000_000, '4k', true, 'promax-2.5')).toBeCloseTo(19.8, 4);
     });
 });

@@ -86,6 +86,9 @@ const OFFICIAL_CNY_PER_M: Record<
         '480p': { noVideo: 72.76, withVideo: 43.52 }, // 官方挂牌(与 720p 同费率)
         '720p': { noVideo: 72.76, withVideo: 43.52 }, // 官方挂牌(原价)
         '1080p': { noVideo: 80.24, withVideo: 47.94 }, // 官方挂牌(原价)
+        // 4k(2026-11-25,仅海外版 global 2.5 开档;proMax 2.5 走 artsmcp intl 仍无 4k,proxy 按 region 拦)。
+        // operator 定价:按国内版 2.5 的 4k÷1080p 比例套 1080p 价。必须显式列:缺了会回落 pro 4k 的 26/16 少收。
+        '4k': { noVideo: 32.3, withVideo: 19.8 },
     },
 };
 

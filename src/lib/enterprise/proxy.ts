@@ -210,9 +210,15 @@ function resolveEnterpriseModel(
             };
         }
     }
-    // 4k:2.0 pro(cn / global)、proMax pro、国内版 seedance-2-5(2026-11-19 开档;variant '2.5' 只有 cn,
-    // global / proMax 的 2.5 是 'promax-2.5',仍无 4k)。
-    if (resRaw === '4k' && variant !== 'pro' && variant !== 'promax' && variant !== '2.5') {
+    // 4k:2.0 pro(cn / global)、proMax pro、国内版 seedance-2-5(2026-11-19 开档)、海外版 seedance-2-5-global
+    // (2026-11-25 开档,上游 dreamina 2.5 支持 4k)。global / proMax 的 2.5 共用 variant 'promax-2.5',
+    // 按 region 区分:proMax 2.5(artsmcp intl)仍无 4k。
+    const allows4k =
+        variant === 'pro' ||
+        variant === 'promax' ||
+        variant === '2.5' ||
+        (variant === 'promax-2.5' && region === 'global');
+    if (resRaw === '4k' && !allows4k) {
         const tiers = region === 'promax' ? '720p / 1080p' : '480p / 720p / 1080p';
         return { error: errJson(400, 'invalid_request', `${rawModel} 无 4k 档(resolution 仅 ${tiers})`) };
     }

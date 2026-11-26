@@ -499,9 +499,9 @@ describe('火山渠道(volc)路由', () => {
         expect(bad.status).toBe(400);
     });
 
-    it('海外版 global 2.5 仍无 4k:传 4k → 400,不打上游', async () => {
+    it('proMax 2.5 仍无 4k(与 global 2.5 共用 variant,按 region 拦):传 4k → 400,不打上游', async () => {
         const res = await handleEnterpriseV1(
-            req('POST', '/v1/video/generations', { model: 'seedance-2-5-global', prompt: 'x', resolution: '4k' }),
+            req('POST', '/v1/video/generations', { model: 'seedance-2-5-promax', prompt: 'x', resolution: '4k' }),
             '/video/generations',
         );
         expect(res.status).toBe(400);
@@ -1728,7 +1728,7 @@ describe('vendor_task_id 出口(2026-08-19)', () => {
             );
         });
 
-        it('480p → seedance2.5-global-480p(2026-10-17 开放);4k → 400(2.5 无 4k)', async () => {
+        it('480p → seedance2.5-global-480p(2026-10-17 开放);4k → seedance2.5-global-4k(2026-11-25 开档)', async () => {
             let res = await handleEnterpriseV1(
                 req('POST', '/v1/video/generations', { model: 'seedance-2-5-global', prompt: 'x', resolution: '480p' }),
                 '/video/generations',
@@ -1739,12 +1739,24 @@ describe('vendor_task_id 出口(2026-08-19)', () => {
                 expect.anything(),
             );
             submitVideoWithKey.mockClear();
+            // beforeEach 的 mockResolvedValue 是同一个 Response,body 只能读一次 → 第二次提交给新的
+            submitVideoWithKey.mockResolvedValue(
+                new Response(JSON.stringify({ task_id: 'cgt-g25-4k', status: 'queued' }), { status: 200 }),
+            );
             res = await handleEnterpriseV1(
-                req('POST', '/v1/video/generations', { model: 'seedance-2-5-global', prompt: 'x', resolution: '4k' }),
+                req('POST', '/v1/video/generations', {
+                    model: 'seedance-2-5-global',
+                    prompt: 'x',
+                    resolution: '4k',
+                    images: ['https://cdn/a.jpg'],
+                }),
                 '/video/generations',
             );
-            expect(res.status).toBe(400);
-            expect(submitVideoWithKey).not.toHaveBeenCalled();
+            expect(res.status).toBe(200);
+            expect(submitVideoWithKey).toHaveBeenCalledWith(
+                expect.objectContaining({ model: 'seedance2.5-global-4k-ref' }),
+                expect.anything(),
+            );
         });
     });
 
