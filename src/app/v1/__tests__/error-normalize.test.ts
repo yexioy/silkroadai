@@ -4,6 +4,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { normalizeImageError, IMAGE_SAFETY_RE, IMAGE_SAFETY_BODY } from '../[...path]/error-normalize';
+import { FAILOVER_MESSAGES, matchFailoverKind } from '@/lib/image-adapter/failover-kind';
 
 interface OfficialError {
     error: { message: string; type: string; param: string | null; code: string | null };
@@ -127,19 +128,161 @@ describe('normalizeImageError — 请求本身错(不再透传嵌套 JSON)', () 
     });
 });
 
-describe('normalizeImageError — 容量(overloaded)', () => {
+describe('normalizeImageError — 断供(503 upstream_unavailable,不再冒充 overloaded)', () => {
     const cases: Array<[string, number]> = [
+        // new-api 自己报分组里该 model 无可用渠道
         ['分组 default 下模型 gpt-image-2 无可用渠道（distributor） (request id: X)', 429],
+        // 旧版适配器的恒定 failover 文案(滚动发布期间新旧副本并存)
         ['The server is temporarily unable to process this request, please retry later.', 503],
+        // 新版适配器 failover:unavailable
+        [FAILOVER_MESSAGES.unavailable, 503],
         ['Service temporarily unavailable', 503],
     ];
-    it.each(cases)('%s → 503 server_error overloaded', (text, status) => {
+    it.each(cases)('%s → 503 server_error upstream_unavailable', (text, status) => {
         const r = normalizeImageError(text, status);
         expect(r.status).toBe(503);
+        expect(r.retryAfter).toBeUndefined();
         const e = parse(r.body);
         expect(e.type).toBe('server_error');
-        expect(e.code).toBeNull();
-        expect(e.message).toContain('overloaded');
+        expect(e.code).toBe('upstream_unavailable');
+        expect(e.message).toContain('temporarily unavailable');
+        expect(e.message).not.toContain('overloaded');
+        expectNoLeak(r.body);
+    });
+});
+
+describe('normalizeImageError — 适配器 failover 原因细分(2026-11-26 拆 503 overloaded)', () => {
+    /** new-api 把渠道(适配器)的 503 体转给我们的真实形态。 */
+    const viaNewApi = (kind: keyof typeof FAILOVER_MESSAGES) =>
+        JSON.stringify({
+            error: {
+                message: `${FAILOVER_MESSAGES[kind]} (request id: 20261126201159140157940eVmADpSV)`,
+                type: 'server_error',
+                param: '',
+                code: 'upstream_unavailable',
+            },
+        });
+
+    it('overloaded → 503 engine_overloaded + Retry-After(唯一保留 overloaded 文案的一类)', () => {
+        const r = normalizeImageError(viaNewApi('overloaded'), 503);
+        expect(r.status).toBe(503);
+        expect(r.retryAfter).toBe(30);
+        const e = parse(r.body);
+        expect(e.type).toBe('server_error');
+        expect(e.code).toBe('engine_overloaded');
+        expect(e.message).toBe('The engine is currently overloaded, please try again later.');
+    });
+
+    it('error → 500 upstream_error(官方 500 文案)', () => {
+        const r = normalizeImageError(viaNewApi('error'), 503);
+        expect(r.status).toBe(500);
+        const e = parse(r.body);
+        expect(e.type).toBe('server_error');
+        expect(e.code).toBe('upstream_error');
+        expect(e.message).toContain('The server had an error while processing your request');
+    });
+
+    it('timeout → 500 upstream_timeout', () => {
+        const r = normalizeImageError(viaNewApi('timeout'), 503);
+        expect(r.status).toBe(500);
+        const e = parse(r.body);
+        expect(e.type).toBe('server_error');
+        expect(e.code).toBe('upstream_timeout');
+        expect(e.message).toContain('timed out');
+    });
+
+    it('no_image → 400 no_image_generated param=prompt(改 prompt 才有用,不让客户空重试)', () => {
+        const r = normalizeImageError(viaNewApi('no_image'), 503);
+        expect(r.status).toBe(400);
+        const e = parse(r.body);
+        expect(e.type).toBe('invalid_request_error');
+        expect(e.code).toBe('no_image_generated');
+        expect(e.param).toBe('prompt');
+    });
+
+    it('unsupported → 503 parameter_combination_unavailable(只看得到最后一跳,不敢终态化成 400)', () => {
+        const r = normalizeImageError(viaNewApi('unsupported'), 503);
+        expect(r.status).toBe(503);
+        expect(r.retryAfter).toBeUndefined();
+        const e = parse(r.body);
+        expect(e.type).toBe('server_error');
+        expect(e.code).toBe('parameter_combination_unavailable');
+        expect(e.message).not.toContain('overloaded');
+    });
+
+    it('unavailable → 503 upstream_unavailable', () => {
+        const r = normalizeImageError(viaNewApi('unavailable'), 503);
+        expect(r.status).toBe(503);
+        expect(parse(r.body).code).toBe('upstream_unavailable');
+    });
+
+    it('六类 failover 文案各自只命中自己(互不串桶),且都不落进 default / 限流 / model_not_found 桶', () => {
+        const seen = new Set<string>();
+        for (const kind of Object.keys(FAILOVER_MESSAGES) as Array<keyof typeof FAILOVER_MESSAGES>) {
+            expect(matchFailoverKind(FAILOVER_MESSAGES[kind])).toBe(kind);
+            const r = normalizeImageError(viaNewApi(kind), 503);
+            const code = parse(r.body).code;
+            expect(code).not.toBeNull();
+            expect(code).not.toBe('rate_limit_exceeded');
+            expect(code).not.toBe('model_not_found');
+            seen.add(code as string);
+            expect(r.body).not.toContain('request id');
+        }
+        expect(seen.size).toBe(6);
+    });
+
+    it('直连渠道上游自己说 overloaded(非适配器)也归 engine_overloaded', () => {
+        const r = normalizeImageError('{"error":{"message":"The engine is currently overloaded"}}', 503);
+        expect(r.status).toBe(503);
+        expect(parse(r.body).code).toBe('engine_overloaded');
+    });
+});
+
+describe('normalizeImageError — 适配器已归一的输入图错误保留细节', () => {
+    const adapterBody = (message: string, param = 'image') =>
+        JSON.stringify({ error: { message, type: 'invalid_request_error', param, code: 'invalid_image' } });
+
+    it('保留具体原因(哪张图 / 为什么),去掉 new-api 追加的 request id', () => {
+        const r = normalizeImageError(
+            adapterBody(
+                'Invalid input image: images[0] format avif is not supported (png/jpeg/webp/gif) (request id: 2026X)',
+            ),
+            400,
+        );
+        expect(r.status).toBe(400);
+        const e = parse(r.body);
+        expect(e.code).toBe('invalid_image');
+        expect(e.param).toBe('image');
+        expect(e.message).toBe('Invalid input image: images[0] format avif is not supported (png/jpeg/webp/gif)');
+    });
+
+    it('蒙版解不开 → param=mask', () => {
+        const r = normalizeImageError(
+            adapterBody('Invalid input image: mask could not be decoded as an image', 'mask'),
+            400,
+        );
+        const e = parse(r.body);
+        expect(e.code).toBe('invalid_image');
+        expect(e.param).toBe('mask');
+    });
+
+    it('适配器没给细节(笼统文案)→ 走原有的统一文案', () => {
+        const r = normalizeImageError(
+            adapterBody(
+                'Invalid input image. Please check that the image file is valid and in a supported format (png, jpeg or webp).',
+            ),
+            400,
+        );
+        const e = parse(r.body);
+        expect(e.code).toBe('invalid_image');
+        expect(e.message).toContain('Invalid input image');
+    });
+
+    it('细节里混进 JSON / HTML 片段 → 不透出,退回统一文案', () => {
+        const r = normalizeImageError(adapterBody('Invalid input image: {"upstream":"adobe"} <html>'), 400);
+        const e = parse(r.body);
+        expect(e.code).toBe('invalid_image');
+        expect(e.message).not.toMatch(/[{}<>]/);
         expectNoLeak(r.body);
     });
 });
@@ -159,7 +302,9 @@ describe('normalizeImageError — 上游临时错(server_error,raw 原文不出�
         expect(r.status).toBe(500);
         const e = parse(r.body);
         expect(e.type).toBe('server_error');
-        expect(e.code).toBeNull();
+        // code 细分(我方扩展;官方为 null):超时 → upstream_timeout,其余 → upstream_error
+        const timedOut = /deadline exceeded|504/.test(text);
+        expect(e.code).toBe(timedOut ? 'upstream_timeout' : 'upstream_error');
         expectNoLeak(r.body);
     });
 });
