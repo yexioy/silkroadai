@@ -74,7 +74,8 @@ const UPSTREAM_GLOBAL_25 = process.env.SEEDANCE_GLOBAL_MODEL_25 || UPSTREAM_PROM
 // (实测:新名支持 720p/1080p、【不支持 480p】;旧名支持 480p/720p)。费率独立(含视/无视两档)。
 // 4k(2026-11-19 开档,挂牌 无视 ¥31 / 含视 ¥19 每 1M):同走 pro 版 260801 —— 当日实测 artsdance-2-5-pro-260801 @4k
 // 受理出片,doubao-seedance-2-5-260628 @4k 3/3 被拒「当前分辨率 4k 不支持」(国内版上游本就是 artsdance 系)。
-const UPSTREAM_XHK_25 = process.env.SEEDANCE_XHK_MODEL_25 || 'artsdance-2-5-pro-260801';
+// 2026-11-26 上游把 pro 版由 260801 升级为 261101,旧名请求已不通 → 默认值换新名(GET /v1/models 实证在列)。
+const UPSTREAM_XHK_25 = process.env.SEEDANCE_XHK_MODEL_25 || 'artsdance-2-5-pro-261101';
 // 480p 单档走 260628(pro 版 260801 拒 480p)。⚠️ 用 doubao- 前缀名而非 artsdance- 名:
 // 2026-09-09 实测 artsdance-2-5-260628 @480p 后端只有 ~50% 支持(12 打 6 随机「480p 不支持」,
 // 720p 却 100% 稳),doubao-seedance-2-5-260628 @480p 是 28/28 全稳(含 audio=false)——
