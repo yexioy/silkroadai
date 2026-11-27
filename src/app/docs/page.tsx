@@ -2239,6 +2239,14 @@ with open("edited.png", "wb") as f:
                         <code className="font-mono text-xs">error</code> 事件给出。
                     </p>
                     <p className="m-0 mb-3 text-xs text-minor-ink leading-relaxed">
+                        「oai高价官k渠道」档的 key 例外:该档的流式由上游原生提供,不发占位动图。
+                        <code className="font-mono text-xs">partial_image</code>{' '}
+                        事件只在上游实际产出渐进图时出现(内容是真实的半成品画面,数量可能少于{' '}
+                        <code className="font-mono text-xs">partial_images</code>,也可能没有),partial 的费用以上游返回的{' '}
+                        <code className="font-mono text-xs">usage</code>{' '}
+                        为准,不按帧固定加收;最终图与非流式调用完全一致。5 秒报错缓冲期同样适用。
+                    </p>
+                    <p className="m-0 mb-3 text-xs text-minor-ink leading-relaxed">
                         /images/edits 的事件名前缀为 <code className="font-mono text-xs">image_edit.</code>。流式只支持{' '}
                         <code className="font-mono text-xs">n = 1</code>(n &gt; 1 返 400)。计费同官方:每个 partial
                         帧加收 100 个 image output token(<code className="font-mono text-xs">partial_images: 2</code> 即{' '}

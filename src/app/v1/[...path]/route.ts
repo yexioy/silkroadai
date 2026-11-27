@@ -60,6 +60,12 @@ import {
     type PlaceholderSpec,
 } from '@/lib/image/stream-placeholder';
 import { stripPartialTag, tagPartialFrames } from '@/lib/image/partial-billing';
+import {
+    collapseImageSse,
+    createNativePartialSink,
+    isNativeStreamKey,
+    type NativePartialSink,
+} from '@/lib/image/native-stream';
 import { newGenerationId } from '@/lib/image/generation-id';
 import { jsonMaskShapeError, maskDimensionError, maskFormatError, multipartMaskShapeError } from '@/lib/image/mask';
 import { resolveOutputBackground } from '@/lib/image/opacity';
@@ -1444,6 +1450,7 @@ async function gptImageUpstream(
         for (const [k, v] of form.entries()) if (typeof v === 'string') j[k] = v;
         foldSvgFormFields(j);
         coerceImageIntFields(j);
+        if (j.stream === 'true') j.stream = true; // 原生流式分组才会带(其余分组 normalize 已剥);JSON 里必须是布尔
         return fetchUpstreamJson(req, j, '/images/generations', search);
     }
     const b = body ?? {};
@@ -1803,7 +1810,7 @@ function gptImageVariant(model: string): { base: string; size: string } | null {
  *  或 multipart→JSON 转换把 form 值(恒字符串)搬进 JSON —— new-api 按 uint 解析 JSON 会 500
  *  `cannot unmarshal string into Go struct field Alias.n of type uint`。就地把纯数字字符串强转成数字。 */
 function coerceImageIntFields(obj: JsonRecord): void {
-    for (const k of ['n', 'output_compression', 'frame_count', 'frame_duration_ms']) {
+    for (const k of ['n', 'output_compression', 'frame_count', 'frame_duration_ms', 'partial_images']) {
         const v = obj[k];
         if (typeof v === 'string' && /^\d+$/.test(v.trim())) obj[k] = Number(v.trim());
     }
@@ -2067,6 +2074,7 @@ async function gptImageSseResponse(
     clientPath: string,
     partialImages = 0,
     placeholder?: PlaceholderEcho,
+    native?: NativePartialSink,
 ): Promise<NextResponse> {
     const earlyError = await settleEarlyImageError(work, imageStreamGraceMs());
     if (earlyError) return earlyError;
@@ -2087,6 +2095,16 @@ async function gptImageSseResponse(
                 emit(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
             const keep = setInterval(() => emit(': keep-alive\n\n'), IMAGE_SSE_KEEPALIVE_MS);
             let seq = 0;
+            // 原生流式分组:上游的真 partial 帧(work 里 collapseImageSse 读到一帧交一帧)原样转给客户,只重排
+            // sequence_number;SSE 开之前(报错缓冲窗口内)到的先攒在 sink 里,这里一次补发。
+            if (native) {
+                const forward = (frame: Record<string, unknown>): void => {
+                    const type = typeof frame.type === 'string' ? frame.type : `${family}.partial_image`;
+                    send(type, { ...frame, type, sequence_number: seq++ });
+                };
+                for (const frame of native.buffered.splice(0)) forward(frame);
+                native.emit = forward;
+            }
             // 占位 partial 帧:开流即发(不等上游)。completed 必须排在它们之后,所以 work 的收尾 await 这个 promise。
             const partials: Promise<void> =
                 partialImages > 0 && placeholder
@@ -2166,6 +2184,7 @@ async function gptImageSseResponse(
                 })
                 .finally(() => {
                     clearInterval(keep);
+                    if (native) native.emit = null;
                     closed = true;
                     try {
                         controller.close();
@@ -2949,6 +2968,8 @@ async function handleImagesDalle(
                         ? String(form.get('safety_identifier') ?? '') || undefined
                         : undefined,
                 };
+                // 原生流式分组(见 @/lib/image/native-stream):非 null 时上游按 SSE 回,partial 帧经它实时转给客户
+                let nativeSink: NativePartialSink | null = null;
                 const run = async (): Promise<NextResponse> => {
                     try {
                         // 统一入口:gpt-image 按有无输入图分流到上游 edits/generations(与调用 path 无关);
@@ -2959,7 +2980,7 @@ async function handleImagesDalle(
                               ? await gptImageUpstreamWithSizeRetry(req, form, null, search)
                               : await fetchUpstreamMultipart(req, form, path, search);
                         return await reshapeOpenAiImageResponse(
-                            upstream,
+                            nativeSink ? await collapseImageSse(upstream, nativeSink) : upstream,
                             prompt,
                             sizeRaw,
                             cap,
@@ -2992,6 +3013,13 @@ async function handleImagesDalle(
                 };
                 // 伪流式:gpt-image + stream:true → 立即 200 开 SSE 保活,完成后发 completed 事件
                 if (wantStream && isGptImageModel(model)) {
+                    // 原生流式分组:stream / partial_images 交还上游,不发占位帧、不打 partial 计费标记
+                    if (await isNativeStreamKey(req.headers.get('authorization'))) {
+                        nativeSink = createNativePartialSink();
+                        form.set('stream', 'true');
+                        if (partialImages > 0) form.set('partial_images', String(partialImages));
+                        return await gptImageSseResponse(run(), path, 0, undefined, nativeSink);
+                    }
                     warmStreamPlaceholders();
                     const spec = placeholderSpecFromRequest(sizeRaw, echo.outputFormat, echo.background);
                     const frames = await markBilledPartialFrames(form, null, partialImages, spec);
@@ -3161,6 +3189,8 @@ async function handleImagesDalle(
                             ? body.safety_identifier || undefined
                             : undefined,
                 };
+                // 原生流式分组(见 @/lib/image/native-stream):非 null 时上游按 SSE 回,partial 帧经它实时转给客户
+                let nativeSink: NativePartialSink | null = null;
                 const run = async (): Promise<NextResponse> => {
                     try {
                         // 统一入口:gpt-image body 里带 images/image/image_url → 图生图 edits;否则文生图 generations。
@@ -3173,7 +3203,7 @@ async function handleImagesDalle(
                               ? await gptImageUpstreamWithSizeRetry(req, null, body, search)
                               : await fetchUpstreamJson(req, body, seedream ? '/images/generations' : path, search);
                         return await reshapeOpenAiImageResponse(
-                            upstream,
+                            nativeSink ? await collapseImageSse(upstream, nativeSink) : upstream,
                             prompt,
                             sizeRaw,
                             cap,
@@ -3205,6 +3235,13 @@ async function handleImagesDalle(
                 };
                 // 伪流式:gpt-image + stream:true → 立即 200 开 SSE 保活,完成后发 completed 事件
                 if (wantStream && isGptImageModel(model)) {
+                    // 原生流式分组:stream / partial_images 交还上游,不发占位帧、不打 partial 计费标记
+                    if (await isNativeStreamKey(req.headers.get('authorization'))) {
+                        nativeSink = createNativePartialSink();
+                        body.stream = true;
+                        if (partialImages > 0) body.partial_images = partialImages;
+                        return await gptImageSseResponse(run(), path, 0, undefined, nativeSink);
+                    }
                     warmStreamPlaceholders();
                     const spec = placeholderSpecFromRequest(sizeRaw, echo.outputFormat, echo.background);
                     const frames = await markBilledPartialFrames(null, body, partialImages, spec);
