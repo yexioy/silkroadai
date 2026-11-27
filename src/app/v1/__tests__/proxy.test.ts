@@ -85,6 +85,11 @@ const mockListChannelGroups = vi.fn(
         { key: 'official', display_name: '官方稳定' },
     ],
 );
+const mockIsNativeStreamKey = vi.fn<(auth: string | null) => Promise<boolean>>(async () => false);
+vi.mock('@/lib/image/native-stream', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('@/lib/image/native-stream')>()),
+    isNativeStreamKey: (auth: string | null) => mockIsNativeStreamKey(auth),
+}));
 vi.mock('@/lib/channel-group', () => ({
     listEnabledChannelGroups: (...a: unknown[]) => mockListChannelGroups(...a),
     restrictGroupsForUser: <T>(g: T[]) => g,
@@ -5412,6 +5417,189 @@ describe('/v1 proxy — CORS(浏览器前端直调,对标 api.openai.com)', () =
         );
         expect(res.headers.get('content-type')).toContain('text/event-stream');
         expect(res.headers.get('access-control-allow-origin')).toBe('*');
+    });
+});
+
+// ── 原生流式分组(oai高价官k渠道):stream 交还上游,真 partial 透传,completed 仍过后处理链 ──
+describe('/v1 proxy — gpt-image 原生流式分组', () => {
+    const ev = (type: string, data: Record<string, unknown>): string =>
+        `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+    function upstreamSse(text: string): Response {
+        return new Response(text, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    }
+    function parse(text: string): Array<{ event: string; data: Record<string, unknown> }> {
+        return text
+            .split('\n\n')
+            .filter((blk) => blk.startsWith('event:'))
+            .map((blk) => {
+                const [evLine, dataLine] = blk.split('\n');
+                return { event: evLine.slice(7).trim(), data: JSON.parse(dataLine.slice(5).trim()) };
+            });
+    }
+    beforeEach(() => {
+        mockIsNativeStreamKey.mockResolvedValue(true);
+    });
+    afterEach(() => {
+        mockIsNativeStreamKey.mockResolvedValue(false);
+    });
+
+    it('JSON generations:stream / partial_images 发给上游且不打计费标记;上游真 partial 原样转发,completed 在后,sequence_number 重排', async () => {
+        mockFetch.mockResolvedValueOnce(
+            upstreamSse(
+                ev('image_generation.partial_image', { b64_json: 'UDA=', partial_image_index: 0, sequence_number: 7 }) +
+                    ev('image_generation.partial_image', {
+                        b64_json: 'UDE=',
+                        partial_image_index: 1,
+                        sequence_number: 8,
+                    }) +
+                    ev('image_generation.completed', {
+                        b64_json: 'QUJD',
+                        created_at: 777,
+                        size: '1024x1024',
+                        quality: 'medium',
+                        background: 'opaque',
+                        output_format: 'png',
+                        usage: { input_tokens: 13, output_tokens: 639, total_tokens: 652 },
+                        sequence_number: 9,
+                    }),
+            ),
+        );
+        const res = await POST(
+            makeReq('/images/generations', {
+                body: {
+                    model: 'gpt-image-2',
+                    prompt: 'x',
+                    size: '1024x1024',
+                    stream: true,
+                    partial_images: 2,
+                    user: 'u1',
+                },
+                headers: { authorization: 'Bearer sk-native' },
+            }),
+            ctx('images', 'generations'),
+        );
+        expect(mockIsNativeStreamKey).toHaveBeenCalledWith('Bearer sk-native');
+        expect(res.status).toBe(200);
+        expect(res.headers.get('content-type')).toContain('text/event-stream');
+        const sent = JSON.parse(String((mockFetch.mock.calls[0][1] as RequestInit).body)) as Record<string, unknown>;
+        expect(sent.stream).toBe(true);
+        expect(sent.partial_images).toBe(2);
+        expect(sent.user).toBe('u1'); // 无 ;sr-partial= 标记:原生分组不加收占位帧
+        const events = parse(await res.text());
+        expect(events.map((e) => e.event)).toEqual([
+            'image_generation.partial_image',
+            'image_generation.partial_image',
+            'image_generation.completed',
+        ]);
+        expect(events.map((e) => e.data.sequence_number)).toEqual([0, 1, 2]);
+        expect(events[0].data.b64_json).toBe('UDA='); // 上游原图,不是占位图
+        expect(events[1].data.partial_image_index).toBe(1);
+        expect(events[2].data.b64_json).toBe('QUJD');
+        expect(events[2].data.usage).toEqual({ input_tokens: 13, output_tokens: 639, total_tokens: 652 });
+        expect(events[2].data.size).toBe('1024x1024');
+    });
+
+    it('上游是 new-api 给适配器渠道包的 SSE(只有 completed + [DONE])→ 只有 completed,没有任何占位帧', async () => {
+        mockFetch.mockResolvedValueOnce(
+            upstreamSse(
+                ev('image_generation.completed', { b64_json: 'QUJD', created_at: 1, usage: { output_tokens: 824 } }) +
+                    'data: [DONE]\n\n',
+            ),
+        );
+        const res = await POST(
+            makeReq('/images/generations', {
+                body: { model: 'gpt-image-2.6-flare', prompt: 'x', size: '1024x1024', stream: true, partial_images: 2 },
+                headers: { authorization: 'Bearer sk-native' },
+            }),
+            ctx('images', 'generations'),
+        );
+        const events = parse(await res.text());
+        expect(events.map((e) => e.event)).toEqual(['image_generation.completed']);
+        expect(events[0].data.sequence_number).toBe(0);
+        expect(events[0].data.b64_json).toBe('QUJD');
+    });
+
+    it('上游在缓冲窗口内报错 → 真实状态码 + JSON(与其余分组一致)', async () => {
+        mockFetch.mockResolvedValueOnce(
+            new Response(JSON.stringify({ error: { message: 'no available channel for model gpt-image-2' } }), {
+                status: 503,
+                headers: { 'content-type': 'application/json' },
+            }),
+        );
+        const res = await POST(
+            makeReq('/images/generations', {
+                body: { model: 'gpt-image-2', prompt: 'x', stream: true, partial_images: 1 },
+                headers: { authorization: 'Bearer sk-native' },
+            }),
+            ctx('images', 'generations'),
+        );
+        expect(res.status).toBe(503);
+        expect(res.headers.get('content-type')).toContain('application/json');
+    });
+
+    it('上游 200 SSE 里是 error 事件 → 窗口内同样回真实错误状态,不回 200', async () => {
+        mockFetch.mockResolvedValueOnce(
+            upstreamSse(ev('error', { error: { message: 'Your request was rejected.', code: 'moderation_blocked' } })),
+        );
+        const res = await POST(
+            makeReq('/images/generations', {
+                body: { model: 'gpt-image-2', prompt: 'x', stream: true },
+                headers: { authorization: 'Bearer sk-native' },
+            }),
+            ctx('images', 'generations'),
+        );
+        expect(res.status).toBeGreaterThanOrEqual(400);
+        expect(res.headers.get('content-type')).toContain('application/json');
+    });
+
+    it('multipart edits:form 带 stream=true / partial_images,事件族 image_edit', async () => {
+        mockFetch.mockResolvedValueOnce(
+            upstreamSse(
+                ev('image_edit.partial_image', { b64_json: 'UDA=', partial_image_index: 0 }) +
+                    ev('image_edit.completed', { b64_json: 'QUJD', created_at: 1 }),
+            ),
+        );
+        const form = new FormData();
+        form.append('model', 'gpt-image-2');
+        form.append('prompt', 'x');
+        form.append('stream', 'true');
+        form.append('partial_images', '1');
+        form.append('image', new Blob([new Uint8Array([137, 80, 78, 71])], { type: 'image/png' }), 'a.png');
+        const req = new NextRequest('https://ai.silkroadai.io/v1/images/edits', {
+            method: 'POST',
+            headers: { authorization: 'Bearer sk-native' },
+            body: form,
+        });
+        const res = await POST(req, ctx('images', 'edits'));
+        const events = parse(await res.text());
+        expect(events.map((e) => e.event)).toEqual(['image_edit.partial_image', 'image_edit.completed']);
+        const fd = (mockFetch.mock.calls[0][1] as RequestInit).body as FormData;
+        expect(fd.get('stream')).toBe('true');
+        expect(fd.get('partial_images')).toBe('1');
+        expect(String(fd.get('user') ?? '')).not.toContain('sr-partial');
+    });
+
+    it('非原生分组的 key:stream / partial_images 仍被剥掉(占位帧伪流式不变)', async () => {
+        mockIsNativeStreamKey.mockResolvedValue(false);
+        mockFetch.mockResolvedValueOnce(
+            new Response(JSON.stringify({ created: 1, data: [{ b64_json: 'QUJD' }] }), {
+                status: 200,
+                headers: { 'content-type': 'application/json' },
+            }),
+        );
+        const res = await POST(
+            makeReq('/images/generations', {
+                body: { model: 'gpt-image-2', prompt: 'x', size: '1024x1024', stream: true, partial_images: 1 },
+                headers: { authorization: 'Bearer sk-other' },
+            }),
+            ctx('images', 'generations'),
+        );
+        const events = parse(await res.text());
+        expect(events.map((e) => e.event)).toEqual(['image_generation.partial_image', 'image_generation.completed']);
+        const sent = JSON.parse(String((mockFetch.mock.calls[0][1] as RequestInit).body)) as Record<string, unknown>;
+        expect(sent.stream).toBeUndefined();
+        expect(sent.partial_images).toBeUndefined();
+        expect(String(sent.user)).toContain(';sr-partial=1');
     });
 });
 
