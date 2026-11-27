@@ -9,6 +9,7 @@ import {
     normalizeEchoOutputFormat,
     sniffImageFormat,
     gptImage26SvgError,
+    gptImageLegacyGifSvgError,
 } from '../[...path]/route';
 
 describe('normalizeEchoQuality — 官方枚举 low/medium/high,auto/standard→low', () => {
@@ -144,5 +145,35 @@ describe('2.6 SVG 回显与校验', () => {
         [{ ...ok, outputCompression: 50 }, 'output_compression', 'invalid_value'],
     ])('非法入参 400:%#', (params, param, code) => {
         expect(gptImage26SvgError(params)).toMatchObject({ param, code });
+    });
+});
+
+describe('gptImageLegacyGifSvgError — gpt-image-2 / 2.5 的 gif、svg 输出按官方 400', () => {
+    it.each([
+        ['gpt-image-2', 'gif'],
+        ['gpt-image-2', 'svg'],
+        ['gpt-image-2-4k', 'gif'],
+        ['az-gpt-image-2', 'svg'],
+        ['gpt-image-2.5-flare', 'gif'],
+        ['gpt-image-2.5-sunburst', ' SVG '],
+    ])('%s + %s → 400 invalid_value', (model, fmt) => {
+        const e = gptImageLegacyGifSvgError(model, fmt);
+        expect(e).toEqual({
+            message: `Invalid value: '${fmt.trim().toLowerCase()}'. Supported values are: 'png', 'jpeg', and 'webp'.`,
+            param: 'output_format',
+            code: 'invalid_value',
+        });
+    });
+    it.each([
+        ['gpt-image-2', 'png'],
+        ['gpt-image-2', 'jpeg'],
+        ['gpt-image-2.5-flare', 'webp'],
+        ['gpt-image-2.5-flare', undefined],
+        ['gpt-image-2.6-flare', 'gif'],
+        ['gpt-image-2.6-sunburst', 'svg'],
+        ['gpt-image-2.6-flare-c', 'gif'],
+        ['seedream-5.0-pro', 'gif'],
+    ])('%s + %s → 放行', (model, fmt) => {
+        expect(gptImageLegacyGifSvgError(model, fmt)).toBeNull();
     });
 });
