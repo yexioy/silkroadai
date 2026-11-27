@@ -2270,6 +2270,25 @@ export function gptImageTransparentJpegError(
     return null;
 }
 
+/** gif / svg 输出是 2.6 才有的官方能力;gpt-image-2 / 2.5 官方对这两个值回 400。此前我们不拦:svg 被静默改成 png
+ *  交付(回显也写 png),gif 由上游给出约 414×414 的小图(2026-11-27 客户兼容测试,oai image 2 组 ch287/288 复现)。
+ *  代理层前置 400,不打上游不计费。只认 gpt-image-2 / 2.5 家族(含 az- 前缀与 -1k/-2k/-4k 别名);
+ *  2.6 及其后缀变体不在此列,仍走各自的 gif / svg 逻辑。 */
+export function gptImageLegacyGifSvgError(
+    model: string,
+    outputFormat: unknown,
+): { message: string; param: string; code: string } | null {
+    const base = model.startsWith('az-') ? model.slice(3) : model;
+    if (!base.startsWith('gpt-image-2') || base.startsWith('gpt-image-2.6')) return null;
+    const of = typeof outputFormat === 'string' ? outputFormat.trim().toLowerCase() : '';
+    if (of !== 'gif' && of !== 'svg') return null;
+    return {
+        message: `Invalid value: '${of}'. Supported values are: 'png', 'jpeg', and 'webp'.`,
+        param: 'output_format',
+        code: 'invalid_value',
+    };
+}
+
 /** 2.6 入参里此前被静默吞掉、200 出图计费的非法组合(2026-11-21 客户 conformance 报告 F1 类,ch336 实测复现):
  *  prompt 超 32000 字符、safety_identifier 超 128 字符、partial_images 越界 / 不带 stream、
  *  帧参数配非 GIF 输出、透明背景配 jpeg、mask 与 markup 同传。都是换渠道也过不去的确定性错误 → 代理层 400,不打上游。
@@ -2817,6 +2836,12 @@ async function handleImagesDalle(
                         cap,
                     );
                     if (pErr) return pErr;
+                    const legacyFmt = gptImageLegacyGifSvgError(model, form.get('output_format'));
+                    if (legacyFmt)
+                        return imageError(legacyFmt.message, 400, cap, {
+                            param: legacyFmt.param,
+                            code: legacyFmt.code,
+                        });
                     if (isGptImage26Model(model)) {
                         const sid = form.get('safety_identifier');
                         const e26 = gptImage26ParamError({
@@ -3029,6 +3054,12 @@ async function handleImagesDalle(
                         cap,
                     );
                     if (pErr) return pErr;
+                    const legacyFmt = gptImageLegacyGifSvgError(model, body.output_format);
+                    if (legacyFmt)
+                        return imageError(legacyFmt.message, 400, cap, {
+                            param: legacyFmt.param,
+                            code: legacyFmt.code,
+                        });
                     if (isGptImage26Model(model)) {
                         const e26 = gptImage26ParamError({
                             prompt: typeof body.prompt === 'string' ? body.prompt : '',

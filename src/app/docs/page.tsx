@@ -1869,7 +1869,10 @@ curl ${OPENAI_BASE}/images/edits \\
                                 <tr className="border-b border-brand-border">
                                     <td className="px-4 py-3 font-mono text-xs text-navy align-top">output_format</td>
                                     <td className="px-4 py-3 text-ink align-top">—</td>
-                                    <td className="px-4 py-3 text-ink">png(默认)/ jpeg(webp 暂不支持)</td>
+                                    <td className="px-4 py-3 text-ink">
+                                        png(默认)/ jpeg(webp 暂不支持)。gif / svg 仅 gpt-image-2.6 支持,gpt-image-2 与
+                                        2.5 传这两个值返回 400
+                                    </td>
                                 </tr>
                                 <tr className="border-b border-brand-border">
                                     <td className="px-4 py-3 font-mono text-xs text-navy align-top">n</td>
