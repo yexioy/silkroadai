@@ -23,6 +23,7 @@ const startShadowMeterScheduler = vi.fn();
 const startBatchScheduler = vi.fn();
 const startEnterpriseReqlogCleanupScheduler = vi.fn();
 const startGroupRatioReconcileScheduler = vi.fn();
+const startCustomerRatioMatrixSyncScheduler = vi.fn();
 vi.mock('@/lib/order/timeout', () => ({ startTimeoutScheduler }));
 vi.mock('@/lib/scheduler/balance-alert', () => ({ startBalanceAlertScheduler }));
 vi.mock('@/lib/scheduler/image-cleanup', () => ({ startImageCleanupScheduler }));
@@ -32,6 +33,7 @@ vi.mock('@/lib/batch/worker', () => ({ startBatchScheduler }));
 // 不 mock 会 import 真调度器 → 初始 sweep 打真 prisma(P1 2026-09-03 的测试盲区,曾致本文件抖动超时)
 vi.mock('@/lib/scheduler/enterprise-reqlog-cleanup', () => ({ startEnterpriseReqlogCleanupScheduler }));
 vi.mock('@/lib/scheduler/group-ratio-reconcile', () => ({ startGroupRatioReconcileScheduler }));
+vi.mock('@/lib/scheduler/customer-ratio-matrix-sync', () => ({ startCustomerRatioMatrixSyncScheduler }));
 // 排空钩子真实现会 patch http.ServerResponse.prototype + 挂 SIGTERM 监听 —— 这里只验证被装上
 const installDrainHook = vi.fn();
 vi.mock('@/lib/server/drain', () => ({ installDrainHook }));
@@ -45,6 +47,7 @@ const ALL_SCHEDULERS = [
     startBatchScheduler,
     startEnterpriseReqlogCleanupScheduler,
     startGroupRatioReconcileScheduler,
+    startCustomerRatioMatrixSyncScheduler,
 ];
 
 describe('instrumentation register()', () => {
@@ -70,7 +73,7 @@ describe('instrumentation register()', () => {
         expect(installDrainHook).toHaveBeenCalledTimes(1); // Part 3 排空钩子随 dispatcher 一起装
     });
 
-    it('nodejs runtime(主站,无门)→ 8 个调度器全部启动', async () => {
+    it('nodejs runtime(主站,无门)→ 9 个调度器全部启动', async () => {
         process.env.NEXT_RUNTIME = 'nodejs';
         const { register } = await import('../instrumentation');
         await register();
