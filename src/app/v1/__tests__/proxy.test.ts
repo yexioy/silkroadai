@@ -5240,7 +5240,7 @@ describe('/v1 proxy — gpt-image 伪流式(stream:true → 官方 SSE completed
         expect(text).toContain('event: image_edit.completed');
     });
 
-    it('stream + 上游报错 → SSE error 事件(归一后的错误体,不是断流)', async () => {
+    it('stream + 上游在缓冲窗口内报错 → 真实状态码 + JSON 错误(不开 SSE、不发占位帧,客户端可正常重试)', async () => {
         mockFetch.mockResolvedValueOnce(
             new Response(JSON.stringify({ error: { message: 'no available channel for model gpt-image-2' } }), {
                 status: 503,
@@ -5248,18 +5248,78 @@ describe('/v1 proxy — gpt-image 伪流式(stream:true → 官方 SSE completed
             }),
         );
         const res = await POST(
-            makeReq('/images/generations', { body: { model: 'gpt-image-2', prompt: 'x', stream: true } }),
+            makeReq('/images/generations', {
+                body: { model: 'gpt-image-2', prompt: 'x', stream: true, partial_images: 2 },
+            }),
             ctx('images', 'generations'),
         );
-        expect(res.status).toBe(200); // SSE 已开,错误走事件
+        expect(res.status).toBe(503);
+        expect(res.headers.get('content-type')).toContain('application/json');
+        expect(res.headers.get('X-Silkroadai-Pseudo-Stream')).toBeNull();
         const text = await res.text();
-        expect(text).toContain('event: error');
-        const data = JSON.parse(text.split('data: ')[1].split('\n')[0]) as {
-            type: string;
-            error: { message: string };
-        };
-        expect(data.type).toBe('error');
-        expect(data.error.message).toBeTruthy();
+        expect(text).not.toContain('partial_image');
+        expect((JSON.parse(text) as { error: { message: string } }).error.message).toBeTruthy();
+    });
+
+    it('stream + 上游在缓冲窗口之后才报错 → 占位帧已发,错误走 SSE error 事件(归一后的错误体,不是断流)', async () => {
+        process.env.IMAGE_STREAM_GRACE_MS = '100';
+        try {
+            mockFetch.mockImplementationOnce(
+                () =>
+                    new Promise((resolve) =>
+                        setTimeout(
+                            () =>
+                                resolve(
+                                    new Response(
+                                        JSON.stringify({
+                                            error: { message: 'no available channel for model gpt-image-2' },
+                                        }),
+                                        { status: 503, headers: { 'content-type': 'application/json' } },
+                                    ),
+                                ),
+                            600,
+                        ),
+                    ),
+            );
+            const res = await POST(
+                makeReq('/images/generations', {
+                    body: { model: 'gpt-image-2', prompt: 'x', stream: true, partial_images: 1 },
+                }),
+                ctx('images', 'generations'),
+            );
+            expect(res.status).toBe(200); // SSE 已开,错误走事件
+            const text = await res.text();
+            expect(text.indexOf('event: image_generation.partial_image')).toBeGreaterThanOrEqual(0);
+            expect(text.indexOf('event: error')).toBeGreaterThan(text.indexOf('event: image_generation.partial_image'));
+            const data = JSON.parse(text.split('event: error\ndata: ')[1].split('\n')[0]) as {
+                type: string;
+                error: { message: string };
+            };
+            expect(data.type).toBe('error');
+            expect(data.error.message).toBeTruthy();
+        } finally {
+            delete process.env.IMAGE_STREAM_GRACE_MS;
+        }
+    });
+
+    it('IMAGE_STREAM_GRACE_MS=0 → 关闭缓冲:上游秒回报错也走 SSE error 事件(旧行为)', async () => {
+        process.env.IMAGE_STREAM_GRACE_MS = '0';
+        try {
+            mockFetch.mockResolvedValueOnce(
+                new Response(JSON.stringify({ error: { message: 'boom' } }), {
+                    status: 503,
+                    headers: { 'content-type': 'application/json' },
+                }),
+            );
+            const res = await POST(
+                makeReq('/images/generations', { body: { model: 'gpt-image-2', prompt: 'x', stream: true } }),
+                ctx('images', 'generations'),
+            );
+            expect(res.status).toBe(200);
+            expect(await res.text()).toContain('event: error');
+        } finally {
+            delete process.env.IMAGE_STREAM_GRACE_MS;
+        }
     });
 
     it('stream + n=2 → 400(伪流限单图),不打上游', async () => {
@@ -6372,6 +6432,11 @@ describe('/v1 proxy — gpt-image-2 size=auto 交给适配器(第 4 批,官方 1
 });
 
 describe('/v1 proxy — 伪流式 partial_image 事件 + sequence_number(第 5 批,官方形状)', () => {
+    let afterGrace: () => void = () => undefined;
+    afterEach(() => {
+        afterGrace();
+        afterGrace = () => undefined;
+    });
     async function realPng(): Promise<string> {
         const sharp = (await import('sharp')).default;
         const buf = await sharp({ create: { width: 64, height: 64, channels: 3, background: '#ff0000' } })
@@ -6442,8 +6507,10 @@ describe('/v1 proxy — 伪流式 partial_image 事件 + sequence_number(第 5 �
         for (const e of events) expect(e.data.type).toBe(e.event);
     });
 
-    it('占位帧在上游返回之前就发出(上游挂 2s,首个 partial 在 1s 内到达)', async () => {
+    it('占位帧在缓冲窗口到点后、上游返回之前发出(窗口 300ms,上游挂 2s,首个 partial 在 0.3–1.5s 之间到达)', async () => {
         const png = await realPng();
+        process.env.IMAGE_STREAM_GRACE_MS = '300';
+        afterGrace = () => delete process.env.IMAGE_STREAM_GRACE_MS;
         mockFetch.mockImplementationOnce(
             () =>
                 new Promise((resolve) =>
@@ -6477,8 +6544,9 @@ describe('/v1 proxy — 伪流式 partial_image 事件 + sequence_number(第 5 �
             if (firstPartialAt < 0 && buf.includes('event: image_generation.partial_image'))
                 firstPartialAt = Date.now() - t0;
         }
-        expect(firstPartialAt).toBeGreaterThanOrEqual(0);
-        expect(firstPartialAt).toBeLessThan(1000);
+        afterGrace();
+        expect(firstPartialAt).toBeGreaterThanOrEqual(280);
+        expect(firstPartialAt).toBeLessThan(1500);
         const events = parseSse(buf);
         expect(events.map((e) => e.event)).toEqual(['image_generation.partial_image', 'image_generation.completed']);
         expect(await pngDims(events[0].data.b64_json as string)).toEqual({ w: 1536, h: 1024 });

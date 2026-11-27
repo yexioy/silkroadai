@@ -2190,8 +2190,8 @@ with open("edited.png", "wb") as f:
                                         image_generation.partial_image
                                     </td>
                                     <td className="px-4 py-3 text-ink align-top">
-                                        开流后 1–3 秒内,共 <code className="font-mono text-xs">partial_images</code>{' '}
-                                        次(0 则没有)
+                                        约 5 秒后(见下方说明),共{' '}
+                                        <code className="font-mono text-xs">partial_images</code> 次(0 则没有)
                                     </td>
                                     <td className="px-4 py-3 text-ink">
                                         <code className="font-mono text-xs">b64_json</code>(占位动图:png 为 APNG、webp
@@ -2215,10 +2215,12 @@ with open("edited.png", "wb") as f:
                                 </tr>
                                 <tr className="border-b border-brand-border">
                                     <td className="px-4 py-3 font-mono text-xs text-navy align-top">error</td>
-                                    <td className="px-4 py-3 text-ink align-top">生成失败,替代 completed</td>
+                                    <td className="px-4 py-3 text-ink align-top">
+                                        开流之后才发生的失败,替代 completed
+                                    </td>
                                     <td className="px-4 py-3 text-ink">
                                         <code className="font-mono text-xs">error.message / type / code</code>(SSE
-                                        已开,HTTP 状态码恒 200,错误只在事件里)
+                                        已开,HTTP 状态码已是 200,错误只在事件里)
                                     </td>
                                 </tr>
                                 <tr>
@@ -2229,6 +2231,13 @@ with open("edited.png", "wb") as f:
                             </tbody>
                         </table>
                     </div>
+                    <p className="m-0 mb-3 text-xs text-minor-ink leading-relaxed">
+                        请求发出后的前 5 秒是报错缓冲期:这段时间内不返回响应头,也不发占位帧。如果请求在缓冲期内就失败
+                        (参数错误、余额不足、上游即时不可用等),会直接返回对应的 HTTP 状态码和 JSON
+                        错误体,与非流式完全一致,不产生任何 partial 帧和费用,客户端按普通失败重试即可。缓冲期过后才开始
+                        SSE 并发出占位帧;此后发生的失败(如内容审核拒绝、超时)以{' '}
+                        <code className="font-mono text-xs">error</code> 事件给出。
+                    </p>
                     <p className="m-0 mb-3 text-xs text-minor-ink leading-relaxed">
                         /images/edits 的事件名前缀为 <code className="font-mono text-xs">image_edit.</code>。流式只支持{' '}
                         <code className="font-mono text-xs">n = 1</code>(n &gt; 1 返 400)。计费同官方:每个 partial
@@ -2250,7 +2259,7 @@ with open("edited.png", "wb") as f:
     "partial_images": 2
   }'
 # 依次收到:
-# event: image_generation.partial_image   ← 1–3s 内,占位动图,index 0
+# event: image_generation.partial_image   ← 约 5s 后,占位动图,index 0
 # event: image_generation.partial_image   ← 占位动图,index 1
 # : keep-alive                            ← 每 15s
 # event: image_generation.completed       ← 最终图 b64_json + usage`}
