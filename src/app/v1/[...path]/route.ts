@@ -1993,12 +1993,42 @@ function normalizeGptImageForm(form: FormData): void {
 // 固定「生成中」占位图(@/lib/image/stream-placeholder,按请求的尺寸 / 格式 / 透明生成,常用尺寸预热),
 // completed 帧再给真图;生成期间每 15s 注 SSE 注释保活(CF ~100s 空闲掐线,慢图 300s+)。completed 字段对齐官方:
 // b64_json / created_at / size / quality / background / output_format / usage;`response_format=url` 扩展时带 url。
-// 失败 → 官方 error 事件(SSE 已开、状态码回不去了,与官方流中错误行为一致)。
+// 失败:开流前的缓冲窗口内(IMAGE_STREAM_GRACE_MS,默认 5s)→ 真实状态码 + JSON;之后 → 官方 error 事件
+// (SSE 已开、状态码回不去了,与官方流中错误行为一致)。
 // 计费(2026-11-20 起按官方口径):每个实际发出的 partial 帧 +100 image output token。代理把帧数经 user 尾标记
 // 传给适配器(@/lib/image/partial-billing),适配器加进 usage → new-api 计费、completed 帧回显同一份 usage。
 // 占位图做不出来(不发帧)就不打标记、不收;直连官 key 渠道不认标记,按上游真实 usage 计。
 
 const IMAGE_SSE_KEEPALIVE_MS = 15_000;
+
+/** 开流前的报错缓冲窗口(2026-11-27)。窗口内先不发响应头:上游在窗口内报错 → 直接回真实状态码 + JSON 错误
+ *  (与非流式一致,不发占位帧、失败请求本就不计费,客户端按普通失败重试);窗口到点仍无结果 → 才开 SSE 发占位帧。
+ *  5s 取自线上分布(11-23 ~ 11-27,gpt-image 最终失败 200 万条):1s 内 81%、5s 内 86%、10s 内 89%,5s 之后
+ *  每多等 1s 收益不到 1 个点;成功请求 5s 内完成的占 0.00%。挡不住的是慢失败:审核拒绝(中位 43s)与超时仍走流内
+ *  error 事件。env IMAGE_STREAM_GRACE_MS 可调,0 = 关闭(开流即发占位帧的旧行为)。 */
+const IMAGE_STREAM_GRACE_DEFAULT_MS = 5_000;
+function imageStreamGraceMs(): number {
+    const raw = process.env.IMAGE_STREAM_GRACE_MS;
+    if (raw == null || raw.trim() === '') return IMAGE_STREAM_GRACE_DEFAULT_MS;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? Math.min(n, 60_000) : IMAGE_STREAM_GRACE_DEFAULT_MS;
+}
+
+/** 等 work 至多 graceMs:窗口内以非 2xx 收尾 → 返回该响应(调用方原样回给客户);其余(成功 / 到点 / 抛错)→ null。
+ *  抛错不在这里处理:极少见(run 内部已兜成 imageError),留给 SSE 分支按 error 事件发,行为不变。 */
+async function settleEarlyImageError(work: Promise<NextResponse>, graceMs: number): Promise<NextResponse | null> {
+    if (graceMs <= 0) return null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), graceMs);
+    });
+    try {
+        const early = await Promise.race([work.catch(() => null), timeout]);
+        return early && (early.status < 200 || early.status >= 300) ? early : null;
+    } finally {
+        clearTimeout(timer);
+    }
+}
 
 /** partial_images(官方 0-3)→ 整数;非法 / 缺省 → 0。 */
 function parsePartialImages(v: unknown): number {
@@ -2029,13 +2059,17 @@ interface PlaceholderEcho {
 
 /** 把非流式 images 流程(reshape 后的 NextResponse promise)包成官方形 SSE。
  *  事件族按客户调用的 path:/images/edits → image_edit.*,其余 → image_generation.*。
- *  partialImages > 0 且能做出占位图 → 开流即发 N 帧占位 partial_image(index 0..N-1),再等 work 发 completed。 */
-function gptImageSseResponse(
+ *  先过报错缓冲窗口(settleEarlyImageError):窗口内上游报错 → 直接回那个非流式错误响应,不开 SSE。
+ *  否则 partialImages > 0 且能做出占位图 → 开流即发 N 帧占位 partial_image(index 0..N-1),再等 work 发 completed。
+ *  窗口内就成功(线上 5s 内 0.00%)也照发占位帧:计费标记在请求发出时已交给适配器,收了就得交付。 */
+async function gptImageSseResponse(
     work: Promise<NextResponse>,
     clientPath: string,
     partialImages = 0,
     placeholder?: PlaceholderEcho,
-): NextResponse {
+): Promise<NextResponse> {
+    const earlyError = await settleEarlyImageError(work, imageStreamGraceMs());
+    if (earlyError) return earlyError;
     const family = clientPath === '/images/edits' ? 'image_edit' : 'image_generation';
     const enc = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({
@@ -2936,7 +2970,7 @@ async function handleImagesDalle(
                     warmStreamPlaceholders();
                     const spec = placeholderSpecFromRequest(sizeRaw, echo.outputFormat, echo.background);
                     const frames = await markBilledPartialFrames(form, null, partialImages, spec);
-                    return gptImageSseResponse(run(), path, frames, { spec, quality: echo.quality || null });
+                    return await gptImageSseResponse(run(), path, frames, { spec, quality: echo.quality || null });
                 }
                 return await run();
             }
@@ -3143,7 +3177,7 @@ async function handleImagesDalle(
                     warmStreamPlaceholders();
                     const spec = placeholderSpecFromRequest(sizeRaw, echo.outputFormat, echo.background);
                     const frames = await markBilledPartialFrames(null, body, partialImages, spec);
-                    return gptImageSseResponse(run(), path, frames, { spec, quality: echo.quality || null });
+                    return await gptImageSseResponse(run(), path, frames, { spec, quality: echo.quality || null });
                 }
                 return await run();
             }
